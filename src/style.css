@@ -1,0 +1,212 @@
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  background: #12141a;
+  color: #e6e8ee;
+  font-family: system-ui, -apple-system, Segoe UI, sans-serif;
+}
+
+#app {
+  position: fixed;
+  inset: 0;
+}
+
+canvas {
+  display: block;
+}
+
+.hud {
+  position: absolute;
+  top: 12px;
+  left: 12px;
+  min-width: 210px;
+  padding: 12px 14px;
+  background: rgba(20, 22, 30, 0.82);
+  border: 1px solid #2a2e3a;
+  border-radius: 8px;
+  font-size: 13px;
+  backdrop-filter: blur(4px);
+  user-select: none;
+}
+
+.hud h1 {
+  margin: 0 0 8px;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.hud button {
+  width: 100%;
+  margin: 2px 0 8px;
+  padding: 6px 8px;
+  background: #2563eb;
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.hud button:hover {
+  background: #1d4ed8;
+}
+
+.hud .context {
+  margin: 6px 0;
+  font-size: 11px;
+  line-height: 1.5;
+  color: #9aa0ad;
+  white-space: pre-line;
+}
+
+.hud .status.connected {
+  color: #4ade80;
+}
+
+.hud .status {
+  margin-bottom: 10px;
+  font-size: 12px;
+  color: #9aa0ad;
+}
+
+.hud .oracle {
+  margin: 8px 0;
+  padding: 8px 10px;
+  border-radius: 6px;
+  font-size: 11px;
+  line-height: 1.6;
+  border: 1px solid #2a2e3a;
+}
+
+.hud .oracle.ok {
+  background: rgba(74, 222, 128, 0.08);
+  border-color: rgba(74, 222, 128, 0.4);
+}
+
+.hud .oracle.bad {
+  background: rgba(255, 45, 111, 0.08);
+  border-color: rgba(255, 45, 111, 0.45);
+}
+
+.hud .oracle-head {
+  font-weight: 600;
+  font-size: 12px;
+  margin-bottom: 4px;
+}
+
+.hud .oracle.ok .oracle-head {
+  color: #4ade80;
+}
+
+.hud .oracle.bad .oracle-head {
+  color: #ff2d6f;
+}
+
+.hud .oracle-line {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: #9aa0ad;
+  white-space: nowrap;
+}
+
+.hud label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 4px 0;
+  cursor: pointer;
+}
+
+.hud .swatch {
+  width: 12px;
+  height: 12px;
+  border-radius: 3px;
+  display: inline-block;
+}
+
+/* Color-picker swatch: strip the native input chrome so it reads as a plain
+   clickable color square, same footprint as a static .swatch. */
+.hud input.swatch {
+  padding: 0;
+  border: none;
+  background: none;
+  cursor: pointer;
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+.hud input.swatch::-webkit-color-swatch-wrapper {
+  padding: 0;
+}
+
+.hud input.swatch::-webkit-color-swatch {
+  border: none;
+  border-radius: 3px;
+}
+
+.hud .count {
+  margin-left: auto;
+  color: #9aa0ad;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Fly-speed slider row. */
+.hud label.speed {
+  margin-top: 8px;
+  font-size: 12px;
+  color: #c2c6d2;
+}
+
+.hud label.speed input[type="range"] {
+  flex: 1;
+  min-width: 0;
+  accent-color: #2563eb;
+  cursor: pointer;
+}
+
+.hud .hint {
+  margin-top: 10px;
+  font-size: 11px;
+  line-height: 1.4;
+  color: #6b7080;
+}
+
+/* Per-kind anomaly sub-toggles, indented under the master "Invisible walls". */
+.hud label.sub {
+  margin: 2px 0 2px 20px;
+  font-size: 12px;
+  color: #c2c6d2;
+}
+
+.hud label.sub .swatch {
+  width: 10px;
+  height: 10px;
+}
+
+/* Inspector panel: shown when an anomaly quad is clicked. */
+.hud .inspector {
+  margin: 10px 0 2px;
+  padding: 7px 10px;
+  background: rgba(255, 255, 255, 0.05);
+  border-left: 3px solid #ff2d6f;
+  border-radius: 4px;
+}
+
+.hud .insp-title {
+  font-weight: 600;
+  font-size: 12px;
+  margin-bottom: 3px;
+  text-transform: capitalize;
+}
+
+.hud .insp-body {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  line-height: 1.55;
+  color: #9aa0ad;
+  white-space: pre-line;
+}
