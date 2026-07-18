@@ -114,7 +114,13 @@ function runProbe(): void {
 const debug: Record<string, unknown> = { viewer, hud };
 if (import.meta.env.DEV) (window as unknown as { __ivw: unknown }).__ivw = debug;
 
-const client = new LiveClient(`ws://localhost:${BRIDGE_DEFAULT_PORT}`, {
+// Dev: Vite serves the page on 5173 and the bridge listens on its own port.
+// Packaged exe: one server does both, so the bridge is wherever the page
+// came from.
+const bridgeUrl = import.meta.env.DEV
+  ? `ws://localhost:${BRIDGE_DEFAULT_PORT}`
+  : `ws://${location.host}`;
+const client = new LiveClient(bridgeUrl, {
   onStatus: (text, connected) => hud.setStatus(text, connected),
   onSurfaces: (surfaces) => {
     liveSurfaces = surfaces;

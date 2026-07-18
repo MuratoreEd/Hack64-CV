@@ -30,12 +30,26 @@ every wall reproduces on its own and gets drawn exactly where the game would sto
 - **Free-fly camera** with an adjustable speed, per-cause color pickers, and toggles
   for every layer.
 
-## Requirements
+## Quick start (no install)
 
-- **[Project64](https://www.pj64-emu.com/)** — Luna's Project64 v3.x is the tested build.
-- **[Node.js](https://nodejs.org/)** 20 or newer (only needed to run the viewer + bridge locally).
+1. Download **`InvisibleWallViewer.exe`** from the
+   [latest release](../../releases/latest).
+2. Double-click it. Your browser opens the viewer.
+3. Start **[Project64](https://www.pj64-emu.com/)** (Luna's PJ64 v3.x is the
+   tested build) with a **US** SM64 ROM, enter a level, and click
+   **"Connect to Project64"** in the viewer.
 
-## Quick start
+That's it — no Node, no terminal. The exe waits for Project64 if it isn't up
+yet, and re-attaches by itself if you close and reopen the emulator. Launching
+the exe twice just reopens the browser tab.
+
+> **Windows SmartScreen:** the exe is unsigned, so the first launch may show
+> "Windows protected your PC". Click **More info → Run anyway**. If the default
+> port is taken, run it from a terminal with `--port=8082`.
+
+## Running from source
+
+Requirements: **[Node.js](https://nodejs.org/)** 20+ and Project64 as above.
 
 ```bash
 # 1. Install dependencies (once)
@@ -90,10 +104,16 @@ geometry rather than hardcoded, so boundary-extended hacks work correctly.
 ## Development
 
 ```bash
-npm test        # collision-core + probe unit tests
-npm run dev     # Vite dev server (viewer)
-npm run build   # type-check + production build
+npm test          # collision-core + probe unit tests
+npm run dev       # Vite dev server (viewer)
+npm run build     # type-check + production build
+npm run build:exe # package the standalone exe (dist-exe/InvisibleWallViewer.exe)
 ```
+
+The exe bundles the built viewer, the bridge, and Node itself into one file
+(via [`@yao-pkg/pkg`](https://github.com/yao-pkg/pkg)); it serves the viewer and
+the WebSocket bridge on one port (default 8081) and embeds koffi's prebuilt
+native module, which is extracted to a temp directory at first launch.
 
 ## Credits & references
 

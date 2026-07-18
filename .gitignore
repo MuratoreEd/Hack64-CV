@@ -4,3 +4,5 @@ dist/
 .DS_Store
 bridge/node_modules/
 .claude/
+build-exe/
+dist-exe/
