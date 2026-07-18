@@ -31,7 +31,6 @@ every wall reproduces on its own and gets drawn exactly where the game would sto
 ## Requirements
 
 - **[Project64](https://www.pj64-emu.com/)** — Luna's Project64 v3.x is the tested build.
-- A **US** SM64 ROM (`sm64.us`) loaded, with a level entered.
 - **[Node.js](https://nodejs.org/)** 20 or newer (only needed to run the viewer + bridge locally).
 
 ## Quick start
