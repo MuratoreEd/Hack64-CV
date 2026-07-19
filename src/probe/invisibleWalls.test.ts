@@ -115,14 +115,23 @@ describe("findInvisibleWalls: exposed ceilings (ceiling-edge march)", () => {
     expect(probe(surfaces).segments).toEqual([]);
   });
 
-  it("stays silent when a sub-height wall guards the seam (bridge rail)", () => {
-    // A wall only 100 tall facing the approach: too short to cover Mario's
-    // hitbox, but the game's floor+30/+60 pushes engage it, so walking Mario
-    // is stopped by real wall collision — an expected barrier, not an anomaly
-    // (verified live: bridge side rails ~106 above the deck were flagged when
-    // height was required).
+  it("sub-height wall guards the GROUND seam but not the air above it", () => {
+    // A wall only 100 tall facing the approach: walking Mario is stopped by
+    // real wall collision (the floor+30/+60 pushes engage it) — so the ground
+    // path stays silent. But AIRBORNE Mario above the rail sails over it (the
+    // air pushes at +30/+150 sit above the wall's top) straight into the
+    // leaked ceiling's blocked band: a real invisible wall over the rail,
+    // reported by the air pass. (The drawn region reaches down to the floor
+    // per the pocket rule; below the rail top the rail itself is the visible
+    // barrier.)
     const surfaces = [...ground(), ...leftCeiling(100), ...capWall(100)];
-    expect(probe(surfaces).segments).toEqual([]);
+    const segments = probe(surfaces).segments;
+    expect(segments.length).toBeGreaterThan(0);
+    for (const s of segments) {
+      expect(s.kind).toBe("exposed-ceiling");
+      expect([0x200, 0x230]).toContain(s.blockerAddr);
+      expect(s.yHigh).toBeGreaterThan(100); // runs past the rail to the sky
+    }
   });
 
   it("ignores a back-facing wall on the seam (pass-through side)", () => {
@@ -164,21 +173,46 @@ describe("findInvisibleWalls: exposed ceilings (ceiling-edge march)", () => {
     }
   });
 
-  it("stays silent when the ceiling clears Mario's height", () => {
-    const surfaces = [...ground(), ...leftCeiling(300)]; // gap 300 > 160
-    expect(probe(surfaces).segments).toEqual([]);
+  it("flags the AIR-ONLY wall above a ceiling Mario can walk under", () => {
+    // Gap 300 > 160: the ground path is rightly silent — walking under is
+    // fine. But perform_air_quarter_step finds the floor from MARIO'S y and
+    // the ceiling from that floor, so airborne Mario above 140 (ceil − 160)
+    // is walled at the ceiling's edge with nothing above it to reset
+    // find_floor: an invisible wall from the ceiling to the sky, detectable
+    // only by the air pass. (This was the probe's blind spot — verified live:
+    // a near-vertical ceiling walled mid-air Mario ~2800 units above its rim
+    // while walking beneath was unobstructed.)
+    const surfaces = [...ground(), ...leftCeiling(300)];
+    const segments = probe(surfaces).segments;
+    expect(segments.length).toBeGreaterThan(0);
+    for (const s of segments) {
+      expect(s.kind).toBe("exposed-ceiling");
+      expect([0x200, 0x230]).toContain(s.blockerAddr);
+      // Pocket below is walkable → region starts at the ceiling plane, and
+      // with no floor above it runs to the sky cap.
+      expect(s.yLow).toBeCloseTo(300, 3);
+      expect(s.yHigh).toBeGreaterThan(300);
+      // Only the exposed boundary x = 0 — outer rims border the void.
+      expect(Math.abs(s.x0)).toBeLessThanOrEqual(2);
+      expect(Math.abs(s.x1)).toBeLessThanOrEqual(2);
+    }
   });
 
   it("respects a scaled marioHeight (4× world-scale hack)", () => {
     // In a 4× hack the same ceiling at collision height 100 is 400 world units
-    // up — far above Mario's 160-world hitbox (40 collision units).
+    // up — far above Mario's 160-world hitbox (40 collision units), so the
+    // GROUND path is silent; only the air-only wall above the ceiling remains.
     const surfaces = [...ground(), ...leftCeiling(100)];
-    expect(probe(surfaces, { marioHeight: 40, ledgeGrace: 25 }).segments)
-      .toEqual([]);
-    // …while a genuinely low ceiling (30 < 40) still fires.
+    const scaled = probe(surfaces, { marioHeight: 40, ledgeGrace: 25 }).segments;
+    for (const s of scaled) {
+      expect(s.kind).toBe("exposed-ceiling");
+      expect(s.yLow).toBeCloseTo(100, 3); // walkable pocket: region starts at ceil
+    }
+    // …while a genuinely low ceiling (30 < 40) still fires from the ground.
     const low = [...ground(), ...leftCeiling(30)];
     const hits = probe(low, { marioHeight: 40, ledgeGrace: 25 }).segments;
     expect(hits.length).toBeGreaterThan(0);
+    expect(hits.some((s) => s.yLow < 1)).toBe(true); // pocket blocked → floor
   });
 
   it("skips dynamic and camera-only surfaces", () => {
@@ -186,6 +220,53 @@ describe("findInvisibleWalls: exposed ceilings (ceiling-edge march)", () => {
     expect(probe([...ground(), ...dyn]).segments).toEqual([]);
     const cam = leftCeiling(100).map((s) => ({ ...s, type: 0x0072 }));
     expect(probe([...ground(), ...cam]).segments).toEqual([]);
+  });
+});
+
+describe("findInvisibleWalls: air-only walls (ceiling-edge air pass)", () => {
+  it("stays silent on a solid slab: the band ends at the landable deck", () => {
+    // A bridge-like slab: ceiling underside at 300, floor deck at 310, same
+    // footprint. Airborne Mario IS blocked at the slab's edge (head would
+    // clip the deck) but that is the slab being solid, not an invisible
+    // wall: find_floor resolves the deck right above the blocker's top, so
+    // the blocked band ends within a hitbox of the geometry and the air pass
+    // must not flag it.
+    const deck: Surface[] = [
+      makeSurface([-200, 310, -200], [-200, 310, 200], [0, 310, 200], { address: 0xb00 })!,
+      makeSurface([-200, 310, -200], [0, 310, 200], [0, 310, -200], { address: 0xb30 })!,
+    ];
+    const surfaces = [...ground(), ...leftCeiling(300), ...deck];
+    expect(probe(surfaces).segments).toEqual([]);
+  });
+
+  it("flags a near-vertical ceiling far above its own top edge (live shape)", () => {
+    // The live false negative, translated to the origin: a steep tri whose
+    // normal.y is just past the ceiling threshold (−0.069), so a "wall" by
+    // eye but a ceiling to the collision engine. Its footprint blocks
+    // airborne Mario from its plane up to the sky — ~2800 units above the
+    // tri's top vertex in the real level — while the 250+ gap under it lets
+    // ground Mario walk through freely.
+    const steep = makeSurface(
+      [1, 256, 130], [203, 270, 103], [191, 474, 119],
+      { address: 0xc00 },
+    )!;
+    expect(steep.kind).toBe("ceiling"); // precondition: classifier agrees
+    const big = (): Surface[] => [
+      makeSurface([-300, 0, -300], [-300, 0, 500], [500, 0, 500], { address: 0x100 })!,
+      makeSurface([-300, 0, -300], [500, 0, 500], [500, 0, -300], { address: 0x130 })!,
+    ];
+    const segments = probe([...big(), steep]).segments;
+    expect(segments.length).toBeGreaterThan(0);
+    for (const s of segments) {
+      expect(s.kind).toBe("exposed-ceiling");
+      expect(s.blockerAddr).toBe(0xc00);
+      expect(s.yHigh).toBeGreaterThan(474); // past the tri's top, to the sky cap
+    }
+    // The wall must cover mid-air heights near the tri's face (the live
+    // report: Mario floating in front of the face at mid-height, blocked).
+    const cols = segments.flatMap((s) => s.columns);
+    expect(cols.length).toBeGreaterThan(0);
+    expect(cols.some((c) => c.yLow <= 380 && c.yHigh >= 380)).toBe(true);
   });
 });
 
@@ -374,6 +455,31 @@ describe("findInvisibleWalls: full-region vertical extents", () => {
     for (const s of segments) {
       expect(s.yLow).toBeCloseTo(0, 3);
       expect(s.yHigh).toBeCloseTo(400, 3);
+    }
+  });
+
+  it("ignores a sort-shadowed floor above: the region keeps going", () => {
+    // Same sliver + deck at 400, plus a steep ramp whose FIRST vertex (y=500)
+    // outranks the deck's (400) in the cell sort but whose plane lies near
+    // y≈2 over the blocked columns. find_floor is first-hit-wins, so from any
+    // height at those columns it returns the ramp — the deck at 400 is
+    // shadowed and never resolves (the floor-overlap bug). A step target
+    // above 400 therefore STAYS blocked by the leaked ceiling, and the region
+    // must run past the deck to the sky cap instead of stopping at 400.
+    // (Live case: alcove slab whose top floor is shadowed by a ramp — Mario
+    // was walled mid-air hundreds of units above the slab.)
+    const ramp: Surface[] = [
+      makeSurface([-30, 500, -200], [1, -15, 200], [1, -15, -200], { address: 0xf00 })!,
+      makeSurface([-30, 500, -200], [-30, 500, 200], [1, -15, 200], { address: 0xf30 })!,
+    ];
+    const surfaces = [...ground(), ...leftCeiling(100), ...upperDeck(400), ...ramp];
+    const segments = probe(surfaces).segments.filter(
+      (s) => s.kind === "exposed-ceiling" && [0x200, 0x230].includes(s.blockerAddr),
+    );
+    expect(segments.length).toBeGreaterThan(0);
+    for (const s of segments) {
+      // Sky cap, not the shadowed deck plane.
+      expect(s.yHigh).toBeGreaterThan(450);
     }
   });
 

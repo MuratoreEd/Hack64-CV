@@ -13,12 +13,16 @@
 //   bb G_TEXTURE  on/off + S/T scale
 //   b6/b7 geometry mode (G_LIGHTING flips vertex colors to normals)
 //   03 G_MOVEMEM  0x86 = directional light (color + dir), 0x88 = ambient
+//   f8 G_SETFOGCOLOR + bc G_MOVEWORD[G_MW_FOG] — fog color and fm/fo factor
 // Lighting starts ON: SM64's init_rsp sets G_LIGHTING every frame, and level
 // materials rely on that default (they only clear it for vertex-colored
 // geometry). Under lighting the vertex color bytes are signed normals, so we
 // evaluate the RSP's diffuse shade (ambient + light·max(0, n̂·l̂)) per vertex.
-// Everything else (syncs, combine, othermode, fog) is ignored — the viewer
-// approximates the common SM64 combine (texture × shade) only.
+// Fog state is captured (last color/factor seen, plus whether any triangle was
+// drawn with G_FOG set) so the viewer can reproduce it as scene fog; per-batch
+// `fogged` records which materials participate. Everything else (syncs,
+// combine, othermode) is ignored — the viewer approximates the common SM64
+// combine (texture × shade) only.
 
 import { Ram, resolveAddr } from "./ram";
 import { decodeTexture, type DecodedTexture } from "./texture";
@@ -31,6 +35,8 @@ export interface GfxBatch {
   wrapS: WrapMode;
   wrapT: WrapMode;
   layer: number;
+  /** Whether this material draws with G_FOG set (participates in scene fog). */
+  fogged: boolean;
   /** xyz per vertex (world units). */
   positions: number[];
   /** uv per vertex (texture units, row 0 = top). */
@@ -39,6 +45,21 @@ export interface GfxBatch {
   colors: number[];
 }
 
+/** Fog state accumulated across a level's display lists. SM64 materials set
+ * one fog color + position for the whole scene (per-material variation is
+ * possible in principle but unused), so last-seen wins. */
+export interface FogState {
+  /** RGB 0..255 from the last G_SETFOGCOLOR, or null if never set. */
+  color: [number, number, number] | null;
+  /** Fog factor from the last G_MW_FOG moveword: fm = 128000/(max-min),
+   * fo = (500-min)*256/(max-min) per gSPFogPosition(min, max). */
+  fm: number;
+  fo: number;
+  /** True once any triangle was emitted with G_FOG set. */
+  used: boolean;
+}
+
+const G_FOG = 0x00010000;
 const G_LIGHTING = 0x00020000;
 const G_TEXTURE_GEN = 0x00040000;
 
@@ -68,6 +89,7 @@ export function interpretDisplayList(
   layer: number,
   batches: Map<string, GfxBatch>,
   textureCache: Map<string, DecodedTexture | null>,
+  fog?: FogState,
 ): void {
   const vtx: Vtx[] = new Array(16);
 
@@ -98,10 +120,13 @@ export function interpretDisplayList(
   let steps = 0;
 
   const materialKey = (): string => {
+    // Fog participation splits the batch: fogged and unfogged triangles need
+    // different Three materials even when the texture state matches.
+    const fogBit = (geoMode & G_FOG) !== 0 ? 1 : 0;
     if (!texOn || !loadedTimg || (geoMode & G_TEXTURE_GEN) !== 0) {
-      return `flat:${layer}`;
+      return `flat:${layer}:${fogBit}`;
     }
-    return `${loadedTimg}:${fmt}:${siz}:${tileW}x${tileH}:${tlut}:${palette}:${wrapS}:${wrapT}:${layer}`;
+    return `${loadedTimg}:${fmt}:${siz}:${tileW}x${tileH}:${tlut}:${palette}:${wrapS}:${wrapT}:${layer}:${fogBit}`;
   };
 
   const getBatch = (): GfxBatch => {
@@ -124,6 +149,7 @@ export function interpretDisplayList(
       wrapS,
       wrapT,
       layer,
+      fogged: (geoMode & G_FOG) !== 0,
       positions: [],
       uvs: [],
       colors: [],
@@ -134,6 +160,7 @@ export function interpretDisplayList(
 
   const emitTri = (i0: number, i1: number, i2: number): void => {
     const batch = getBatch();
+    if (fog && batch.fogged) fog.used = true;
     for (const i of [i0, i1, i2]) {
       const v = vtx[i];
       if (!v) return;
@@ -283,8 +310,26 @@ export function interpretDisplayList(
       case 0xb6: // G_CLEARGEOMETRYMODE
         geoMode &= ~w1;
         break;
+      case 0xf8: // G_SETFOGCOLOR (rgba packed in w1)
+        if (fog) {
+          fog.color = [(w1 >>> 24) & 0xff, (w1 >>> 16) & 0xff, (w1 >>> 8) & 0xff];
+        }
+        break;
+      case 0xbc: {
+        // G_MOVEWORD (F3D: index in the LOW 16 bits, offset in bits 16-23 —
+        // gSPPerspNormalize's famous BC00000E has G_MW_PERSPNORM=0x0E low).
+        // G_MW_FOG=0x08 @ offset 0 carries (fm << 16) | (fo & 0xffff);
+        // fo is signed (negative for the usual 900..1000 range). Confirmed
+        // live: bc000008:0b1cf5e4 = fogPosition(955, 1000).
+        const index = w0 & 0xffff;
+        if (fog && index === 0x08 && ((w0 >>> 16) & 0xff) === 0) {
+          fog.fm = (w1 >>> 16) & 0xffff;
+          fog.fo = ((w1 & 0xffff) << 16) >> 16;
+        }
+        break;
+      }
       default:
-        break; // syncs, combine, othermode, lights, fog: ignored
+        break; // syncs, combine, othermode: ignored
     }
   }
 }

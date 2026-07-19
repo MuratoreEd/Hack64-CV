@@ -27,6 +27,8 @@ every wall reproduces on its own and gets drawn exactly where the game would sto
 - **Textured level view** — the game's real geometry, parsed straight from its display
   lists and textures in RAM, with faithful vertex lighting.
 - **Skybox** — the loaded sky panorama, reconstructed from RAM.
+- **Fog** — the level's own fog color and range, parsed from its display lists
+  (toggleable, off by default).
 - **Free-fly camera** with an adjustable speed, per-cause color pickers, and toggles
   for every layer.
 

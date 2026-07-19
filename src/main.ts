@@ -76,9 +76,20 @@ let prevPos: { x: number; y: number; z: number } | null = null;
 // latest posted request always wins.
 let probedKey = "";
 let probeWorker: Worker | null = null;
+// In-flight probe requests. The worker answers strictly in order, so a result
+// that arrives while newer requests are still queued is stale — drawing it
+// would flash walls that the next result immediately moves or removes (worst
+// at connect, where scale detection flips 1 → 4 and re-probes). Stale results
+// are skipped and the HUD shows a "probing…" banner until the last one lands.
+let probesPending = 0;
 // The textured view needs a full RDRAM snapshot (graph nodes + display lists
 // + textures). Requested once per level/area; large, so never streamed.
 let gfxKey = "";
+// Camera framing: reframe on a real level/area change only. The new level's
+// surfaces can arrive just before OR just after the state frame that carries
+// the new level id, so the change opens a short window during which incoming
+// surface pools also reframe (frame() is idempotent for identical bounds).
+let reframeUntil = 0;
 
 function runProbe(): void {
   if (!partition) return;
@@ -90,11 +101,20 @@ function runProbe(): void {
       type: "module",
     });
     probeWorker.onmessage = (e: MessageEvent<ProbeResult>) => {
+      probesPending--;
+      if (probesPending > 0) return; // stale: a newer request is queued
+      hud.setProbeBusy(false);
       viewer.setAnomalies(e.data.segments);
       hud.setProbe(e.data);
       debug.probe = e.data;
     };
+    probeWorker.onerror = () => {
+      probesPending = 0;
+      hud.setProbeBusy(false);
+    };
   }
+  probesPending++;
+  hud.setProbeBusy(true);
   const request: ProbeRequest = {
     surfaces: liveSurfaces,
     options: {
@@ -126,6 +146,7 @@ const client = new LiveClient(bridgeUrl, {
     liveSurfaces = surfaces;
     surfaceByAddr = new Map(surfaces.map((s) => [s.address >>> 0, s]));
     viewer.setSurfaces(surfaces);
+    if (Date.now() < reframeUntil) viewer.reframe();
     hud.setCounts(viewer.counts);
     partition = new SpatialPartition(surfaces);
     debug.surfaces = surfaces;
@@ -133,10 +154,14 @@ const client = new LiveClient(bridgeUrl, {
     runProbe();
   },
   onRdram: (bytes) => {
+    // Dev hook: lets DL-level issues be probed in-page (don't retain the
+    // 8 MB snapshot in prod, where __ivw isn't exposed anyway).
+    if (import.meta.env.DEV) debug.rdram = bytes;
     const model = buildLevelModel(bytes);
     viewer.setLevelModel(model);
     hud.setTexturedAvailable(model !== null);
     hud.setSkyboxAvailable(model?.skybox != null);
+    hud.setFogAvailable(model?.fog != null);
     debug.levelModel = model;
   },
   onState: (state) => {
@@ -147,6 +172,11 @@ const client = new LiveClient(bridgeUrl, {
     if (nextGfxKey !== gfxKey) {
       gfxKey = nextGfxKey;
       client.send({ type: "rdram" });
+      // A real level/area change: snap the camera to the new level (and let
+      // the surface pools arriving over the next moments do the same, in
+      // case they land after this state frame).
+      viewer.reframe();
+      reframeUntil = Date.now() + 2000;
     }
     runProbe(); // no-op unless the pool or the detected scale changed
     const moved =

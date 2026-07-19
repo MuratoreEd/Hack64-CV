@@ -11,7 +11,7 @@ import type {
   InvisibleWallKind,
 } from "../probe/invisibleWalls";
 import { ANOMALY_KIND_COLOR, ANOMALY_KINDS } from "./palette";
-import type { LevelModel } from "../gfx/level";
+import type { LevelFog, LevelModel } from "../gfx/level";
 import type { GfxBatch, WrapMode } from "../gfx/f3d";
 import type { SkyboxImage } from "../gfx/skybox";
 
@@ -49,21 +49,37 @@ export class Viewer {
   private pitch = 0;
   private lastPointer: { x: number; y: number } | null = null;
   private meshView: CollisionMeshView | null = null;
-  private marioMarker: THREE.Mesh | null = null;
+  private marioMarker: THREE.Sprite | null = null;
   private zFlip: boolean;
+  // Camera framing is explicit: the last derived bounds are kept so main.ts
+  // can reframe() on a real level/area change, while mid-level geometry
+  // refreshes (objects spawning/despawning re-stream the pool) leave the
+  // camera alone.
+  private lastBounds: LevelBounds | null = null;
+  private framedOnce = false;
 
   // Textured level model (parsed from the game's own display lists). Lives in
   // WORLD units; the scene is collision space, so the group is scaled by
   // 1/worldScale. The textured/collision toggle swaps which mesh renders —
-  // the anomaly overlay stays visible in both views.
+  // the anomaly overlay stays visible in both views. Textured is the default
+  // and takes over as soon as a model parses; until then applyViewMode falls
+  // back to the collision mesh.
   private modelGroup: THREE.Group | null = null;
   private modelScale = 1;
-  private texturedVisible = false;
+  private texturedVisible = true;
 
   // Sky panorama parsed from the game (an inverted cylinder that follows the
   // camera, drawn first and never writing depth, so it acts as a background).
   private skyboxGroup: THREE.Group | null = null;
   private skyboxVisible = true;
+
+  // The game's fog (color + eye distances in world units, parsed from the
+  // display lists). Only fogged model batches opt in (material.fog) — the
+  // collision mesh, overlays, marker, and sky always render unfogged. Off by
+  // default; the HUD toggle flips it.
+  private fogInfo: LevelFog | null = null;
+  private fogEnabled = false;
+  private readonly fog = new THREE.Fog(0x000000, 1, 2);
 
   // Probe anomalies: one mesh per kind (for per-kind color + toggles + a
   // single draw call regardless of box count) grouped together, plus one
@@ -113,6 +129,7 @@ export class Viewer {
     this.scene.add(dir);
 
     this.scene.add(this.helpers);
+    this.helpers.visible = false; // grid & axes off by default (HUD toggle)
     this.anomalyGroup.renderOrder = 2;
     this.scene.add(this.anomalyGroup);
     for (const k of ANOMALY_KINDS) {
@@ -172,7 +189,22 @@ export class Viewer {
 
     const bounds = deriveLevelBounds(surfaces);
     this.rebuildHelpers(bounds);
-    this.frame(bounds);
+    // Frame only the very first scene (the offline demo). After that the
+    // camera is the user's: surfaces re-stream mid-level whenever the pool
+    // changes, and snapping the view on every refresh was a bug. main.ts
+    // calls reframe() when the level/area genuinely changes.
+    this.lastBounds = bounds;
+    if (!this.framedOnce && Number.isFinite(bounds.minX)) {
+      this.framedOnce = true;
+      this.frame(bounds);
+    }
+  }
+
+  /** Re-frame the camera on the current level's bounds. frame() is a pure
+   * function of the bounds, so repeated calls during a level transition are
+   * visually idempotent. */
+  reframe(): void {
+    if (this.lastBounds) this.frame(this.lastBounds);
   }
 
   get counts(): Record<SurfaceKind, number> {
@@ -228,7 +260,45 @@ export class Viewer {
         this.scene.add(this.skyboxGroup);
       }
     }
+    this.fogInfo = model?.fog ?? null;
+    this.applyFog();
     this.applyViewMode();
+  }
+
+  get hasFog(): boolean {
+    return this.fogInfo !== null;
+  }
+
+  /** Toggle the game's fog (only fogged model materials participate). */
+  setFogEnabled(enabled: boolean): void {
+    this.fogEnabled = enabled;
+    this.applyFog();
+  }
+
+  private applyFog(): void {
+    const f = this.fogInfo;
+    const want = f !== null && this.fogEnabled;
+    // Flipping scene.fog needs a program rebuild on the participating
+    // materials; mark them dirty explicitly rather than relying on the
+    // renderer noticing the fog swap on its own.
+    if (want !== (this.scene.fog !== null) && this.modelGroup) {
+      this.modelGroup.traverse((obj) => {
+        if (obj instanceof THREE.Mesh) {
+          const mat = obj.material as THREE.MeshBasicMaterial;
+          if (mat.fog) mat.needsUpdate = true;
+        }
+      });
+    }
+    if (want && f) {
+      this.fog.color.setRGB(...f.color, THREE.SRGBColorSpace);
+      // Distances are world units; the scene is collision space.
+      this.fog.near = f.near / this.modelScale;
+      this.fog.far = f.far / this.modelScale;
+      this.scene.fog = this.fog;
+    } else {
+      this.scene.fog = null;
+    }
+    this.needsRender = true;
   }
 
   get hasSkybox(): boolean {
@@ -274,6 +344,7 @@ export class Viewer {
       new THREE.MeshBasicMaterial({
         depthWrite: false,
         depthTest: false,
+        fog: false, // the sky is beyond the fog by definition
         ...opts,
       });
 
@@ -303,6 +374,7 @@ export class Viewer {
     if (scale === this.modelScale) return;
     this.modelScale = scale;
     this.updateModelTransform();
+    this.applyFog(); // fog distances are world units / scale
   }
 
   /** true = show the textured level, false = show collision surfaces. The
@@ -363,6 +435,7 @@ export class Viewer {
       map,
       vertexColors: true, // N64 combine approximation: texture × shade
       side: THREE.DoubleSide,
+      fog: batch.fogged, // only materials the game drew with G_FOG
     });
     if (batch.layer >= 5) {
       mat.transparent = true;
@@ -522,6 +595,7 @@ export class Viewer {
         opacity: 0.6,
         side: THREE.DoubleSide,
         depthWrite: false,
+        fog: false, // overlays must stay legible with game fog on
       });
       const mesh = new THREE.Mesh(geo, mat);
       mesh.visible = this.anomalyKindVisible.get(kind) ?? true;
@@ -601,6 +675,7 @@ export class Viewer {
       side: THREE.DoubleSide,
       depthWrite: false,
       depthTest: false,
+      fog: false,
     });
     this.anomalyHighlight = new THREE.Mesh(geo, mat);
     this.anomalyHighlight.renderOrder = 3;
@@ -617,10 +692,29 @@ export class Viewer {
       return;
     }
     if (!this.marioMarker) {
-      const marker = new THREE.Mesh(
-        new THREE.SphereGeometry(60, 16, 12),
-        new THREE.MeshBasicMaterial({ color: 0xffffff }),
+      // A small camera-facing badge — white disc with a red "M" — 1/20th the
+      // radius of the old sphere, so the marker pinpoints exactly where Mario
+      // is and which wall he's touching instead of swallowing the area.
+      // Drawn through geometry (no depth test) so he stays locatable.
+      const canvas = document.createElement("canvas");
+      canvas.width = canvas.height = 128;
+      const g = canvas.getContext("2d")!;
+      g.beginPath();
+      g.arc(64, 64, 62, 0, Math.PI * 2);
+      g.fillStyle = "#ffffff";
+      g.fill();
+      g.font = "700 88px system-ui, Segoe UI, sans-serif";
+      g.textAlign = "center";
+      g.textBaseline = "middle";
+      g.fillStyle = "#d02020";
+      g.fillText("M", 64, 72);
+      const map = new THREE.CanvasTexture(canvas);
+      map.colorSpace = THREE.SRGBColorSpace;
+      const marker = new THREE.Sprite(
+        new THREE.SpriteMaterial({ map, depthTest: false, fog: false }),
       );
+      marker.scale.set(6, 6, 1); // radius 3: the old sphere's 60 / 20
+      marker.renderOrder = 4; // above the anomaly boxes and highlight
       this.marioMarker = marker;
       this.scene.add(marker);
     }
@@ -643,6 +737,10 @@ export class Viewer {
     const axes = new THREE.AxesHelper(size * 0.15);
     axes.position.set(cx, b.minY, cz);
     this.helpers.add(axes);
+    // Viewer furniture never participates in the game's fog.
+    for (const h of [grid, axes]) {
+      (h.material as THREE.LineBasicMaterial).fog = false;
+    }
   }
 
   private frame(b: LevelBounds): void {

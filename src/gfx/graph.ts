@@ -31,6 +31,8 @@ const DL_TYPES = new Set([
 const TYPE_OBJECT = 0x018;
 // GRAPH_NODE_TYPE_BACKGROUND = 0x02C | GRAPH_NODE_TYPE_FUNCTIONAL (0x100).
 const TYPE_BACKGROUND = 0x12c;
+// GRAPH_NODE_TYPE_PERSPECTIVE = 0x003 | GRAPH_NODE_TYPE_FUNCTIONAL.
+const TYPE_PERSPECTIVE = 0x103;
 
 export interface AreaDisplayList {
   /** DL address as stored (may be segmented 0xSSxxxxxx). */
@@ -80,6 +82,38 @@ export function collectAreaDisplayLists(ram: Ram): AreaDisplayList[] | null {
   return out;
 }
 
+/** DFS the current area's graph for the first node of `type` whose struct is
+ * at least `size` bytes readable. Shared by the background/perspective node
+ * lookups; returns the node address or null. */
+function findNodeOfType(ram: Ram, type: number, size: number): number | null {
+  if (!ram.ok(US_GCURRENT_AREA, 4)) return null;
+  const areaPtr = ram.u32(US_GCURRENT_AREA);
+  if (!KSEG0(areaPtr) || !ram.ok(areaPtr, 0x3c)) return null;
+  const root = ram.u32(areaPtr + 4);
+  if (!KSEG0(root) || (ram.s16(root) & 0xffff) !== 0x001) return null;
+
+  const visited = new Set<number>();
+  const walk = (node: number, depth: number): number | null => {
+    if (!KSEG0(node) || !ram.ok(node, Math.max(size, 0x18))) return null;
+    if (visited.has(node) || visited.size > 20000 || depth > 40) return null;
+    visited.add(node);
+    const nodeType = ram.s16(node) & 0xffff;
+    if (nodeType === type) return node;
+    if (nodeType === TYPE_OBJECT) return null;
+    const first = ram.u32(node + 0x10);
+    if (!KSEG0(first)) return null;
+    let child = first;
+    for (let i = 0; i < 1024; i++) {
+      const found = walk(child, depth + 1);
+      if (found !== null) return found;
+      child = ram.u32(child + 8);
+      if (child === first || !KSEG0(child)) break;
+    }
+    return null;
+  };
+  return walk(root, 0);
+}
+
 export interface BackgroundNode {
   /** GraphNodeFunc (geo_skybox_main for textured skies; 0 = solid color). */
   func: number;
@@ -91,32 +125,30 @@ export interface BackgroundNode {
  * at +0x14, s32 background at +0x18). Returns null when the snapshot has no
  * loaded area or the graph carries no background node. */
 export function findBackgroundNode(ram: Ram): BackgroundNode | null {
-  if (!ram.ok(US_GCURRENT_AREA, 4)) return null;
-  const areaPtr = ram.u32(US_GCURRENT_AREA);
-  if (!KSEG0(areaPtr) || !ram.ok(areaPtr, 0x3c)) return null;
-  const root = ram.u32(areaPtr + 4);
-  if (!KSEG0(root) || (ram.s16(root) & 0xffff) !== 0x001) return null;
+  const node = findNodeOfType(ram, TYPE_BACKGROUND, 0x1c);
+  if (node === null) return null;
+  return { func: ram.u32(node + 0x14), background: ram.u32(node + 0x18) };
+}
 
-  const visited = new Set<number>();
-  const walk = (node: number, depth: number): BackgroundNode | null => {
-    if (!KSEG0(node) || !ram.ok(node, 0x1c)) return null;
-    if (visited.has(node) || visited.size > 20000 || depth > 40) return null;
-    visited.add(node);
-    const type = ram.s16(node) & 0xffff;
-    if (type === TYPE_BACKGROUND) {
-      return { func: ram.u32(node + 0x14), background: ram.u32(node + 0x18) };
-    }
-    if (type === TYPE_OBJECT) return null;
-    const first = ram.u32(node + 0x10);
-    if (!KSEG0(first)) return null;
-    let child = first;
-    for (let i = 0; i < 1024; i++) {
-      const found = walk(child, depth + 1);
-      if (found) return found;
-      child = ram.u32(child + 8);
-      if (child === first || !KSEG0(child)) break;
-    }
-    return null;
-  };
-  return walk(root, 0);
+export interface PerspectiveNode {
+  /** Vertical field of view in degrees. */
+  fov: number;
+  /** Near / far clipping planes (world units). */
+  near: number;
+  far: number;
+}
+
+/** Find the GEO_CAMERA_FRUSTUM node (struct GraphNodePerspective: FnGraphNode,
+ * s32 unused @+0x18, f32 fov @+0x1C, s16 near @+0x20, s16 far @+0x22).
+ * Values are sanity-checked — a garbage read returns null so callers fall
+ * back to the vanilla defaults instead of nonsense planes. */
+export function findPerspectiveNode(ram: Ram): PerspectiveNode | null {
+  const node = findNodeOfType(ram, TYPE_PERSPECTIVE, 0x24);
+  if (node === null) return null;
+  const fov = ram.f32(node + 0x1c);
+  const near = ram.s16(node + 0x20);
+  const far = ram.s16(node + 0x22);
+  if (!Number.isFinite(fov) || fov <= 1 || fov >= 179) return null;
+  if (near <= 0 || far <= near) return null;
+  return { fov, near, far };
 }

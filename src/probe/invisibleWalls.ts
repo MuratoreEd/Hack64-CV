@@ -12,6 +12,17 @@
 // one of those early returns presents to the player as a wall — and when no
 // wall surface is actually there, an INVISIBLE wall.
 //
+// perform_air_quarter_step blocks the same way with different constants: wall
+// pushes (150, 50) then (30, 50), then `floorHeight = find_floor(x, MARIO'S y,
+// z)` and `ceilHeight` from that floor + 80 — so a ceiling's blocked band
+// extends from ceilHeight−160 all the way up to the next floor that find_floor
+// RESOLVES to, even when the gap below it clears Mario and walking under is
+// fine (`if (nextPos[1] + 160.0f > ceilHeight) ... return AIR_STEP_HIT_WALL`).
+// Ground marching alone misses that class (verified live: a near-vertical tri
+// classified as ceiling — ny −0.069 — walled airborne Mario ~2800 units above
+// the tri's own top edge, with walking under it unobstructed), so ceiling
+// edges get a second, air-step check; see checkAirStep.
+//
 // Step 0 is why walls "cap" leaked ceilings: the target can never come to rest
 // within the push radius in front of a front-facing wall, so a ceiling leaking
 // less than that past its wall is unreachable and never blocks — while a
@@ -288,6 +299,10 @@ export function findInvisibleWalls(
   const wallOffset = opts.wallOffset ?? 60;
   const wallRadius = opts.wallRadius ?? 50;
   const maxSamples = opts.maxSamplesPerEdge ?? 2048;
+  // perform_air_quarter_step's wall pushes sit at +150/+30 world units (the
+  // ground step uses +60) with the same 50 radius; scale like marioHeight.
+  const airUpperOffset = (150 / 160) * marioHeight;
+  const airLowerOffset = (30 / 160) * marioHeight;
 
   // Where an open column's blocked region visually ends: just above the
   // level's highest geometry (derived per level — never a hardcoded bound).
@@ -329,14 +344,26 @@ export function findInvisibleWalls(
    * `dirX/dirZ` point from the walkable side toward the target (used to tell a
    * narrow crack from an intentional level-boundary void).
    */
-  /** Lowest floor plane above `y` at the column, or the sky cap. A floor above
-   * ends a blocked region: find_floor resolves to it from up there. */
+  /** Lowest floor plane above `y` that ACTUALLY ends the blocked region, or
+   * the sky cap. A floor above only resets find_floor if find_floor RESOLVES
+   * to it — the cell sort (vertices[0].y desc, first-hit-wins) can shadow a
+   * floor behind one sorted earlier whose plane sits far lower at this column
+   * (the floor-overlap bug). A shadowed floor never truncates: queries from
+   * above it still fall through to the low floor, keep finding the blocking
+   * ceiling, and stay blocked. Verified live (alcove slab whose top floor is
+   * shadowed by a ramp → air/ground steps blocked hundreds of units above
+   * the slab, far past the old geometric cap). */
+  const aFloor = { surface: null, height: 0 } as ReturnType<typeof partition.findFloor>;
   const floorAbove = (x: number, z: number, y: number): number => {
-    let best = skyCap;
-    for (const f of partition.floorsAt(x, z)) {
-      if (f.height > y && f.height < best) best = f.height;
+    const above = partition
+      .floorsAt(x, z)
+      .filter((f) => f.height > y)
+      .sort((a, b) => a.height - b.height);
+    for (const f of above) {
+      partition.findFloorInto(x, f.height + 1, z, aFloor);
+      if (aFloor.surface && aFloor.height >= f.height - 0.01) return f.height;
     }
-    return best;
+    return skyCap;
   };
 
   const checkStep = (
@@ -405,6 +432,78 @@ export function findInvisibleWalls(
     };
   };
 
+  /**
+   * Air-only invisible walls (perform_air_quarter_step): tried at ceiling-edge
+   * samples where the GROUND step passed. Tested just above the marched
+   * ceiling's highest vertex — where blocked collision is, by definition, not
+   * explained by the visible surface. Two things keep legit solids silent:
+   *   - the air wall pushes (150/30, radius 50): a solid box's side walls cap
+   *     horizontal entry whenever the box is thicker than the lower push
+   *     offset (30), exactly as in the game;
+   *   - the blocked band must extend more than a hitbox above the blocker's
+   *     own top vertex: a thinner slab's band ends at its landable deck
+   *     (find_floor resolves the deck right above the test height), so a
+   *     bridge reads as "the bridge is solid", not as an invisible wall.
+   * A leaked ceiling has neither wall nor deck, and its band runs to the next
+   * resolvable floor or the sky — that is the wall this check reports.
+   */
+  const checkAirStep = (
+    tx: number,
+    tz: number,
+    wx: number,
+    wz: number,
+    surfTopY: number,
+  ): StepBlock | null => {
+    const yTest = surfTopY + 2;
+    // The approach column must be free air at the test height: over a void the
+    // approach itself is an air wall (floor NULL → AIR_STEP_HIT_WALL), and on
+    // interior seams both sides are blocked — neither is observable from
+    // gameplay-reachable space.
+    partition.findFloorInto(wx, yTest, wz, wFloor);
+    if (!wFloor.surface) return null;
+    partition.findCeilInto(wx, wFloor.height + 80, wz, wCeil);
+    if (wCeil.surface && yTest + marioHeight > wCeil.height) return null;
+    // Air wall pushes move the target first: upper (150) then lower (30).
+    wallData.x = tx;
+    wallData.y = yTest;
+    wallData.z = tz;
+    wallData.offsetY = airUpperOffset;
+    wallData.radius = wallRadius;
+    wallData.walls.length = 0;
+    wallData.numWalls = 0;
+    partition.findWallCollisionsInto(wallData);
+    wallData.offsetY = airLowerOffset;
+    wallData.walls.length = 0;
+    wallData.numWalls = 0;
+    partition.findWallCollisionsInto(wallData);
+    const ax = wallData.x;
+    const az = wallData.z;
+    partition.findFloorInto(ax, yTest, az, tFloor);
+    if (!tFloor.surface) return null; // air OOB: ground marching covers cracks
+    const floorH = tFloor.height;
+    partition.findCeilInto(ax, floorH + 80, az, tCeil);
+    if (!tCeil.surface) return null;
+    if (!(yTest + marioHeight > tCeil.height)) return null;
+    const cSurf = tCeil.surface;
+    const cTop = Math.max(
+      cSurf.vertices[0][1],
+      cSurf.vertices[1][1],
+      cSurf.vertices[2][1],
+    );
+    const yHigh = floorAbove(ax, az, tCeil.height);
+    // Suppress only bands capped by a REAL landable floor near the blocker's
+    // top (a slab's deck). A sky-open column is never suppressed — even when
+    // the blocker is the level's topmost geometry and the sky cap sits just
+    // a hitbox above it.
+    if (yHigh !== skyCap && yHigh <= cTop + marioHeight) return null;
+    return {
+      kind: "exposed-ceiling",
+      yLow: floorH + marioHeight >= tCeil.height ? floorH : tCeil.height,
+      yHigh,
+      blockerAddr: cSurf.address >>> 0,
+    };
+  };
+
   // Per-sample target-column scratch (blocked-side candidates, at most 3).
   const targetX = [0, 0, 0];
   const targetZ = [0, 0, 0];
@@ -426,6 +525,9 @@ export function findInvisibleWalls(
     const dz = b[2] - a[2];
     const len = Math.hypot(dx, dz);
     if (len < 1e-6) return; // edge is vertical in XZ — no footprint boundary
+    // Highest vertex of the marched ceiling: the air check tests just above
+    // it, where blocking cannot be explained by the surface itself.
+    const surfTopY = Math.max(a[1], b[1], c[1]);
 
     // Unit perpendicular oriented toward the third vertex (footprint inside).
     let px = -dz / len;
@@ -503,30 +605,47 @@ export function findInvisibleWalls(
           : Math.trunc(planeHeight(surf, wx, wz)) + 1;
 
       const floorH = walkableAt(wx, seedY, wz);
-      if (Number.isNaN(floorH)) continue;
 
       let block: StepBlock | null = null;
       let bx = 0;
       let bz = 0;
-      for (let t = 0; t < nTargets; t++) {
-        const tx = targetX[t];
-        const tz = targetZ[t];
-        const dx = tx - wx;
-        const dz = tz - wz;
-        const dLen = Math.max(1, Math.sqrt(dx * dx + dz * dz));
-        block = checkStep(floorH, tx, tz, dx / dLen, dz / dLen);
-        if (block) {
-          bx = tx;
-          bz = tz;
-          break;
+      if (!Number.isNaN(floorH)) {
+        for (let t = 0; t < nTargets; t++) {
+          const tx = targetX[t];
+          const tz = targetZ[t];
+          const dx = tx - wx;
+          const dz = tz - wz;
+          const dLen = Math.max(1, Math.sqrt(dx * dx + dz * dz));
+          block = checkStep(floorH, tx, tz, dx / dLen, dz / dLen);
+          if (block) {
+            bx = tx;
+            bz = tz;
+            break;
+          }
+        }
+      }
+      // Air pass, ceiling edges only, and only where the ground step found
+      // nothing (never double-flags a cell). Runs even when there is no
+      // standable approach under the ceiling — airborne Mario needs none.
+      if (!block && walkSide === "out") {
+        for (let t = 0; t < nTargets; t++) {
+          block = checkAirStep(targetX[t], targetZ[t], wx, wz, surfTopY);
+          if (block) {
+            bx = targetX[t];
+            bz = targetZ[t];
+            break;
+          }
         }
       }
       if (!block) continue;
+      // Where Mario "stands" when he hits it: the walkable-side floor, or for
+      // an air-only wall with no standable approach, the region's own base.
+      const base = Number.isNaN(floorH) ? block.yLow : floorH;
 
       if (run !== null && i === prevI + 1 && run.kind === block.kind) {
         run.x1 = mx;
         run.z1 = mz;
-        run.yBase = Math.min(run.yBase, floorH);
+        run.yBase = Math.min(run.yBase, base);
         run.yLow = Math.min(run.yLow, block.yLow);
         run.yHigh = Math.max(run.yHigh, block.yHigh);
         run.count++;
@@ -543,7 +662,7 @@ export function findInvisibleWalls(
         flush();
         run = {
           x0: mx, z0: mz, x1: mx, z1: mz,
-          yBase: floorH,
+          yBase: base,
           yLow: block.yLow,
           yHigh: block.yHigh,
           kind: block.kind,

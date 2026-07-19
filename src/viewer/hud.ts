@@ -69,6 +69,10 @@ export interface Hud {
   setTexturedAvailable(available: boolean): void;
   /** Show/hide the skybox toggle (once a sky panorama is parsed). */
   setSkyboxAvailable(available: boolean): void;
+  /** Show/hide the fog toggle (once the level's fog is parsed). */
+  setFogAvailable(available: boolean): void;
+  /** Show/hide the "probing…" banner while probe runs are in flight. */
+  setProbeBusy(busy: boolean): void;
 }
 
 export function createHud(
@@ -92,6 +96,15 @@ export function createHud(
   status.className = "status";
   status.textContent = "Offline — showing demo scene";
   hud.appendChild(status);
+
+  // Probe-in-flight banner: the wall overlay may redraw (or shift, when the
+  // world scale is detected mid-run) until the last queued probe lands — this
+  // tells the user not to trust half-baked walls yet.
+  const probing = document.createElement("div");
+  probing.className = "probing";
+  probing.textContent = "Probing invisible walls…";
+  probing.style.display = "none";
+  hud.appendChild(probing);
 
   const context = document.createElement("div");
   context.className = "context";
@@ -143,10 +156,11 @@ export function createHud(
 
   // Textured-view toggle: swaps the collision mesh for the level's real
   // (textured) geometry. Hidden until a model has been parsed from RDRAM.
+  // On by default — the viewer switches over as soon as a model parses.
   const texturedLabel = document.createElement("label");
   const texturedCheckbox = document.createElement("input");
   texturedCheckbox.type = "checkbox";
-  texturedCheckbox.checked = false;
+  texturedCheckbox.checked = true;
   texturedCheckbox.addEventListener("change", () =>
     viewer.setTexturedVisible(texturedCheckbox.checked),
   );
@@ -171,11 +185,27 @@ export function createHud(
   skyboxLabel.style.display = "none";
   hud.appendChild(skyboxLabel);
 
+  // Fog toggle: the game's own fog (color + range parsed from the display
+  // lists). Off by default; hidden until the level actually uses fog.
+  const fogLabel = document.createElement("label");
+  const fogCheckbox = document.createElement("input");
+  fogCheckbox.type = "checkbox";
+  fogCheckbox.checked = false;
+  fogCheckbox.addEventListener("change", () =>
+    viewer.setFogEnabled(fogCheckbox.checked),
+  );
+  const fogName = document.createElement("span");
+  fogName.textContent = "Fog";
+  fogLabel.append(fogCheckbox, fogName);
+  fogLabel.style.display = "none";
+  hud.appendChild(fogLabel);
+
   // Grid/axes helper toggle (always available — pure viewer furniture).
+  // Off by default to keep the scene clean.
   const helpersLabel = document.createElement("label");
   const helpersCheckbox = document.createElement("input");
   helpersCheckbox.type = "checkbox";
-  helpersCheckbox.checked = true;
+  helpersCheckbox.checked = false;
   helpersCheckbox.addEventListener("change", () =>
     viewer.setHelpersVisible(helpersCheckbox.checked),
   );
@@ -382,6 +412,12 @@ export function createHud(
     },
     setSkyboxAvailable(available) {
       skyboxLabel.style.display = available ? "" : "none";
+    },
+    setFogAvailable(available) {
+      fogLabel.style.display = available ? "" : "none";
+    },
+    setProbeBusy(busy) {
+      probing.style.display = busy ? "" : "none";
     },
   };
 }

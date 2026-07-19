@@ -81,6 +81,7 @@ export function buildCollisionMesh(
       side: THREE.DoubleSide,
       roughness: 1,
       metalness: 0,
+      fog: false, // analysis view: never obscured by the game's fog
     });
     disposables.push(mat);
     kindGroup.add(new THREE.Mesh(geom, mat));
@@ -91,6 +92,7 @@ export function buildCollisionMesh(
       color: 0x0b0d12,
       transparent: true,
       opacity: 0.25,
+      fog: false,
     });
     disposables.push(lineMat);
     kindGroup.add(new THREE.LineSegments(wire, lineMat));
