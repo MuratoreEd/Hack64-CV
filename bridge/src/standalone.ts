@@ -27,8 +27,9 @@ import type {
   SurfacesMessage,
   ClientMessage,
 } from "../../src/net/protocol.js";
+import { LOOPBACK_HOST, verifyClient } from "./wsGuard.js";
+import { APP_VERSION as VERSION } from "../../src/version.js";
 
-const VERSION = "1.0.0";
 const DEFAULT_PORT = 8081;
 const STATE_INTERVAL_MS = 100;
 const ATTACH_RETRY_MS = 2000;
@@ -191,7 +192,9 @@ async function main(): Promise<void> {
   }
 
   const server = http.createServer(serveStatic);
-  const wss = new WebSocketServer({ server });
+  // Origin allowlist: WebSockets ignore the same-origin policy, so without it
+  // any page open in the user's browser could pull the emulator's RAM.
+  const wss = new WebSocketServer({ server, verifyClient });
 
   wss.on("connection", (ws) => {
     console.log("viewer connected");
@@ -261,7 +264,9 @@ async function main(): Promise<void> {
     }
   });
 
-  server.listen(port, () => {
+  // Loopback only — the viewer and the emulator are both on this machine, and
+  // the bridge hands out the emulator's entire address space.
+  server.listen(port, LOOPBACK_HOST, () => {
     console.log(`Viewer running at ${url}`);
     console.log("Start Project64 with a US SM64 ROM and enter a level,");
     console.log('then click "Connect to Project64" in the browser.');

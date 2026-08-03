@@ -21,6 +21,8 @@ import type {
   SurfacesMessage,
   ClientMessage,
 } from "../../src/net/protocol.js";
+import { LOOPBACK_HOST, verifyClient } from "./wsGuard.js";
+import { APP_VERSION } from "../../src/version.js";
 
 const DEFAULT_PORT = 8081;
 const STATE_INTERVAL_MS = 100;
@@ -87,8 +89,11 @@ function runDump(rd: Rdram): void {
 }
 
 function serve(proc: ProcessMemory, rd: Rdram, port: number): void {
-  const wss = new WebSocketServer({ port });
-  console.log(`WebSocket bridge listening on ws://localhost:${port}`);
+  // Loopback only: this hands out the emulator's whole address space, so it
+  // has no business being reachable from the network. The origin allowlist
+  // covers the other half — a browser on THIS machine is also on loopback.
+  const wss = new WebSocketServer({ port, host: LOOPBACK_HOST, verifyClient });
+  console.log(`WebSocket bridge listening on ws://${LOOPBACK_HOST}:${port}`);
 
   const send = (ws: WebSocket, msg: ServerMessage) => {
     if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg));
@@ -149,6 +154,7 @@ function serve(proc: ProcessMemory, rd: Rdram, port: number): void {
 }
 
 function main(): void {
+  console.log(`SM64 Invisible Wall Viewer bridge v${APP_VERSION}`);
   const args = process.argv.slice(2);
   const dump = args.includes("--dump");
   const portArg = args.find((a) => a.startsWith("--port="));

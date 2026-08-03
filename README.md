@@ -49,6 +49,22 @@ the exe twice just reopens the browser tab.
 > "Windows protected your PC". Click **More info → Run anyway**. If the default
 > port is taken, run it from a terminal with `--port=8082`.
 
+### Network access
+
+The viewer reads the emulator's memory, so the bridge is deliberately confined
+to your own machine:
+
+- it listens on **loopback only** (`127.0.0.1`) — nothing on your network can
+  reach it, including from another PC in the same house;
+- WebSocket connections are accepted only from **loopback origins** (the
+  viewer's own page, or the Vite dev server), because WebSockets are exempt
+  from the browser's same-origin policy and any site you happen to have open
+  could otherwise ask the bridge for a RAM dump.
+
+Nothing is ever sent off your machine — there is no telemetry, no update check
+and no outbound connection of any kind. You can re-check both properties on a
+running bridge with `npx tsx bridge/scripts/checkBridgeSecurity.ts`.
+
 ## Running from source
 
 Requirements: **[Node.js](https://nodejs.org/)** 20+ and Project64 as above.

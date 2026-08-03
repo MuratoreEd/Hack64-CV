@@ -12,6 +12,7 @@ import {
 } from "./palette";
 import type { OracleResult } from "../collision/oracle";
 import type { ProbeResult, InvisibleWallKind } from "../probe/invisibleWalls";
+import { APP_VERSION } from "../version";
 
 const swatchHex = (c: number): string => "#" + c.toString(16).padStart(6, "0");
 
@@ -88,6 +89,11 @@ export function createHud(
 
   const title = document.createElement("h1");
   title.textContent = "Invisible Wall Viewer";
+  // Version in the UI so a bug report says which build it came from.
+  const version = document.createElement("span");
+  version.className = "version";
+  version.textContent = `v${APP_VERSION}`;
+  title.appendChild(version);
   hud.appendChild(title);
 
   const connectBtn = document.createElement("button");

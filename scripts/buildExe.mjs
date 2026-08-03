@@ -22,6 +22,10 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const stage = path.join(root, "build-exe", "app");
 const outExe = path.join(root, "dist-exe", "InvisibleWallViewer.exe");
 const TARGET = "node24-win-x64";
+// Never a literal: src/version.ts is the single source (see it for why).
+const { version } = JSON.parse(
+  fs.readFileSync(path.join(root, "package.json"), "utf8"),
+);
 
 function step(name) {
   console.log(`\n=== ${name} ===`);
@@ -72,7 +76,7 @@ fs.writeFileSync(
   JSON.stringify(
     {
       name: "sm64-iwv-standalone",
-      version: "1.0.0",
+      version,
       bin: { iwv: "index.cjs" },
       pkg: {
         assets: ["dist/**/*", "node_modules/koffi/**/*"],
