@@ -22,11 +22,32 @@ function base64ToArrayBuffer(b64: string): ArrayBuffer {
 
 export class LiveClient {
   private ws: WebSocket | null = null;
+  // Wall-classification cutoff for parsing (CollisionProfile.wallThreshold).
+  // Detected live, so the last pool is retained: when the verdict changes the
+  // pool must be re-classified rather than waiting for the next stream.
+  private wallThreshold: number | undefined;
+  private lastPool: { buffer: ArrayBuffer; count: number; base: number } | null =
+    null;
 
   constructor(
     private url: string,
     private handlers: LiveHandlers,
   ) {}
+
+  /** Re-classify the current pool under a new wall threshold. No-op when the
+   * threshold is unchanged or no pool has arrived yet. */
+  setWallThreshold(threshold: number): void {
+    if (threshold === this.wallThreshold) return;
+    this.wallThreshold = threshold;
+    const p = this.lastPool;
+    if (!p) return;
+    this.handlers.onSurfaces(
+      parseSurfacePool(p.buffer, p.count, {
+        baseAddress: p.base,
+        wallThreshold: threshold,
+      }),
+    );
+  }
 
   connect(): void {
     if (this.ws) return;
@@ -47,8 +68,10 @@ export class LiveClient {
     const msg = JSON.parse(data) as ServerMessage;
     if (msg.type === "surfaces") {
       const buffer = base64ToArrayBuffer(msg.base64);
+      this.lastPool = { buffer, count: msg.count, base: msg.poolBase };
       const surfaces = parseSurfacePool(buffer, msg.count, {
         baseAddress: msg.poolBase,
+        wallThreshold: this.wallThreshold,
       });
       this.handlers.onSurfaces(surfaces);
     } else if (msg.type === "state") {

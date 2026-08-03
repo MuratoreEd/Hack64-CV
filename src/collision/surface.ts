@@ -6,7 +6,6 @@ import {
   SURFACE_OFFSETS,
   SURFACE_FLAG_X_PROJECTION,
   FLOOR_NORMAL_Y_THRESHOLD,
-  CEIL_NORMAL_Y_THRESHOLD,
 } from "./constants";
 
 export type Vec3s = [number, number, number];
@@ -45,10 +44,14 @@ export interface Surface {
 }
 
 /** Classify a surface as floor/ceiling/wall from its normal's Y component,
- * matching `add_surface_to_cell` in surface_load.c. */
-export function classifyKind(normalY: number): SurfaceKind {
-  if (normalY > FLOOR_NORMAL_Y_THRESHOLD) return SurfaceKind.Floor;
-  if (normalY < CEIL_NORMAL_Y_THRESHOLD) return SurfaceKind.Ceiling;
+ * matching `add_surface_to_cell` in surface_load.c. `threshold` is the wall
+ * cutoff: vanilla 0.01, Frame's collision patch 0.05 (see CollisionProfile). */
+export function classifyKind(
+  normalY: number,
+  threshold: number = FLOOR_NORMAL_Y_THRESHOLD,
+): SurfaceKind {
+  if (normalY > threshold) return SurfaceKind.Floor;
+  if (normalY < -threshold) return SurfaceKind.Ceiling;
   return SurfaceKind.Wall;
 }
 
@@ -61,6 +64,9 @@ export interface ParseOptions {
   littleEndian?: boolean;
   /** RDRAM address of the first surface, so each surface's `address` is exact. */
   baseAddress?: number;
+  /** Wall-classification cutoff on |normal.y| (CollisionProfile.wallThreshold).
+   * Defaults to vanilla 0.01. */
+  wallThreshold?: number;
 }
 
 function readVec3s(view: DataView, off: number, littleEndian: boolean): Vec3s {
@@ -105,7 +111,7 @@ export function parseSurface(
     normal,
     originOffset: view.getFloat32(byteOffset + o.originOffset, le),
     object: view.getUint32(byteOffset + o.object, le) >>> 0,
-    kind: classifyKind(normal.y),
+    kind: classifyKind(normal.y, opts.wallThreshold),
     xProjection: (flags & SURFACE_FLAG_X_PROJECTION) !== 0,
   };
 }

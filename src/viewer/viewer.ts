@@ -743,29 +743,30 @@ export class Viewer {
     }
   }
 
+  /** Eagle-eye establishing shot for a freshly loaded stage: hover over the
+   * world origin (x = z = 0) above everything and look straight down, so the
+   * level's layout reads at a glance and north/south stays unrotated. Height is
+   * derived from the footprint and the vertical FOV so the whole stage fits. */
   private frame(b: LevelBounds): void {
     if (!Number.isFinite(b.minX)) return;
-    const zs = this.zFlip ? -1 : 1;
-    const cx = (b.minX + b.maxX) / 2;
-    const cy = (b.minY + b.maxY) / 2;
-    const cz = ((b.minZ + b.maxZ) / 2) * zs;
     const size = Math.max(
       b.maxX - b.minX,
       b.maxY - b.minY,
       b.maxZ - b.minZ,
       1000,
     );
-    const dist = size * 1.6;
-    this.camera.position.set(cx + dist, cy + dist * 0.7, cz + dist);
+    // Half the wider horizontal span must fit in half the vertical FOV.
+    const span = Math.max(b.maxX - b.minX, b.maxZ - b.minZ, 1000);
+    const halfFov = THREE.MathUtils.degToRad(this.camera.fov / 2);
+    const lift = (span / 2) / Math.tan(halfFov);
+    this.camera.position.set(0, b.maxY + lift, 0);
     this.camera.near = Math.max(1, size / 2000);
     this.camera.far = size * 20;
     this.camera.updateProjectionMatrix();
-    // Aim at the level center and scale fly speed to the level.
-    const dir = new THREE.Vector3(cx, cy, cz)
-      .sub(this.camera.position)
-      .normalize();
-    this.pitch = Math.asin(THREE.MathUtils.clamp(dir.y, -1, 1));
-    this.yaw = Math.atan2(-dir.x, -dir.z);
+    // Straight down, held just inside the same pitch limit mouse-look uses so
+    // the first drag doesn't snap.
+    this.pitch = -Math.PI / 2 + 0.02;
+    this.yaw = 0;
     this.applyLook();
     // ~size/6 units per second at 1× — deliberately gentle; the HUD slider
     // multiplies up to 8× and Shift adds another ×4 when you want to travel.

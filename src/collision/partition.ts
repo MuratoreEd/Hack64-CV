@@ -19,6 +19,7 @@ import {
   CELL_HEIGHT_LIMIT,
   SURFACE_CAMERA_BOUNDARY,
 } from "./constants";
+import type { FloorSelect } from "./profile";
 import {
   toS16,
   findFloorFromListInto,
@@ -73,6 +74,19 @@ export interface PartitionOptions {
    * results are identical while candidate counts drop ~10×. Off by default;
    * the probe's bulk workloads (millions of queries) turn it on. */
   accel?: boolean;
+  /** Floor/ceiling selection rule (CollisionProfile.select): "first" = vanilla
+   * first-hit-wins, "extreme" = highest floor / lowest ceiling (ROMs whose
+   * collision patch fixes surface cucking). Defaults to "first". */
+  select?: FloorSelect;
+  /** How far outside its XZ bbox a wall may influence a query — the fine grid
+   * inflates wall footprints by this much. Defaults to WALL_MAX_RADIUS (200),
+   * correct for any radius the game itself uses. A caller that only ever
+   * queries with a small radius can pass that instead and get far smaller wall
+   * bins: the probe uses radius 50/scale, so on a 4× hack 200 over-inflates by
+   * 16× and stuffs every bin with walls it can never touch. Queries with a
+   * radius LARGER than this automatically fall back to the coarse cell list,
+   * so shrinking it can never change a result. */
+  wallReach?: number;
 }
 
 /** Fine bins per axis inside one partition cell. */
@@ -95,6 +109,9 @@ export class SpatialPartition {
   readonly boundary: number;
   readonly numCells: number;
   readonly cellSize: number;
+  readonly select: FloorSelect;
+  /** Wall-bbox inflation used when building the fine grid (see wallReach). */
+  readonly wallReach: number;
   private readonly cellsIndex: number; // NUM_CELLS_INDEX = numCells - 1
   private readonly staticCells: Cell[]; // flat [z * numCells + x]
   private readonly dynamicCells: Cell[];
@@ -104,6 +121,8 @@ export class SpatialPartition {
   constructor(surfaces: Surface[], opts: PartitionOptions = {}) {
     this.boundary = opts.boundary ?? deriveBoundary(surfaces);
     this.numCells = opts.numCells ?? VANILLA_NUM_CELLS;
+    this.select = opts.select ?? "first";
+    this.wallReach = Math.min(opts.wallReach ?? WALL_REACH, WALL_REACH);
     // CELL_SIZE = LEVEL_BOUNDARY_MAX / (NUM_CELLS / 2) = 2*boundary / numCells.
     this.cellSize = (2 * this.boundary) / this.numCells;
     this.cellsIndex = this.numCells - 1;
@@ -196,8 +215,8 @@ export class SpatialPartition {
         };
         this.scatter(cell.floors, fine.floors, cx, cz, 0);
         this.scatter(cell.ceilings, fine.ceilings, cx, cz, 0);
-        // Walls influence points up to WALL_REACH outside their bbox.
-        this.scatter(cell.walls, fine.walls, cx, cz, WALL_REACH);
+        // Walls influence points up to wallReach outside their bbox.
+        this.scatter(cell.walls, fine.walls, cx, cz, this.wallReach);
         out[idx] = fine;
       }
     }
@@ -309,8 +328,28 @@ export class SpatialPartition {
     return out;
   }
 
+  /** findFloor under an explicit selection rule, ignoring this partition's
+   * configured one — lets the oracle ask both questions of one partition to
+   * learn which engine the running ROM is (see detectFloorSelect). */
+  findFloorWith(
+    xPos: number,
+    yPos: number,
+    zPos: number,
+    select: FloorSelect,
+  ): SurfaceHit {
+    const out: SurfaceHit = { surface: null, height: 0 };
+    this.findFloorInto(xPos, yPos, zPos, out, select);
+    return out;
+  }
+
   /** Allocation-free findFloor: writes the result into `out`. */
-  findFloorInto(xPos: number, yPos: number, zPos: number, out: SurfaceHit): void {
+  findFloorInto(
+    xPos: number,
+    yPos: number,
+    zPos: number,
+    out: SurfaceHit,
+    select: FloorSelect = this.select,
+  ): void {
     const x = toS16(xPos);
     const y = toS16(yPos);
     const z = toS16(zPos);
@@ -326,11 +365,11 @@ export class SpatialPartition {
     const dyn = this.dynScratch;
     findFloorFromListInto(
       this.candidates(this.fineDynamic, this.dynamicCells, idx, cxi, czi, "floors", x, z),
-      x, y, z, dyn,
+      x, y, z, dyn, select,
     );
     findFloorFromListInto(
       this.candidates(this.fineStatic, this.staticCells, idx, cxi, czi, "floors", x, z),
-      x, y, z, out,
+      x, y, z, out, select,
     );
     if (dyn.height > out.height) {
       out.surface = dyn.surface;
@@ -367,6 +406,30 @@ export class SpatialPartition {
     return out;
   }
 
+  /**
+   * Every STATIC wall in the cell covering (x, z), unfiltered. Unlike
+   * findWallCollisions (which engages only walls within a push radius of a
+   * point, capped at 4), this exposes the wall shell around a column at ANY
+   * height — the probe uses it to tell a column inside solid geometry from one
+   * in open air, where the bounding wall can sit far above Mario.
+   *
+   * Returns the partition's OWN list — do not mutate. Callers must skip
+   * SURFACE_CAMERA_BOUNDARY themselves; handing back the live array keeps this
+   * allocation-free for the probe's bulk use (bins hold ~100 walls, since the
+   * fine grid inflates wall footprints by the max push reach).
+   */
+  wallsAt(xPos: number, zPos: number): readonly Surface[] {
+    const x = toS16(xPos);
+    const z = toS16(zPos);
+    if (!this.inBounds(x, z)) return EMPTY_LIST;
+    const cxi = this.queryCell(x);
+    const czi = this.queryCell(z);
+    const idx = czi * this.numCells + cxi;
+    return this.candidates(
+      this.fineStatic, this.staticCells, idx, cxi, czi, "walls", x, z,
+    );
+  }
+
   /** find_ceil: like findFloor, but dynamic wins only if strictly lower. */
   findCeil(xPos: number, yPos: number, zPos: number): SurfaceHit {
     const out: SurfaceHit = { surface: null, height: 0 };
@@ -391,11 +454,11 @@ export class SpatialPartition {
     const dyn = this.dynScratch;
     findCeilFromListInto(
       this.candidates(this.fineDynamic, this.dynamicCells, idx, cxi, czi, "ceilings", x, z),
-      x, y, z, dyn,
+      x, y, z, dyn, this.select,
     );
     findCeilFromListInto(
       this.candidates(this.fineStatic, this.staticCells, idx, cxi, czi, "ceilings", x, z),
-      x, y, z, out,
+      x, y, z, out, this.select,
     );
     if (dyn.height < out.height) {
       out.surface = dyn.surface;
@@ -435,12 +498,17 @@ export class SpatialPartition {
     const cxi = this.queryCell(x);
     const czi = this.queryCell(z);
     const idx = czi * this.numCells + cxi;
+    // The fine grid only guarantees a superset for radii it was inflated for;
+    // anything wider must use the full cell list (see PartitionOptions.wallReach).
+    const wide = Math.abs(data.radius) > this.wallReach;
+    const fineDyn = wide ? null : this.fineDynamic;
+    const fineSta = wide ? null : this.fineStatic;
     findWallCollisionsFromList(
-      this.candidates(this.fineDynamic, this.dynamicCells, idx, cxi, czi, "walls", x, z),
+      this.candidates(fineDyn, this.dynamicCells, idx, cxi, czi, "walls", x, z),
       data,
     );
     findWallCollisionsFromList(
-      this.candidates(this.fineStatic, this.staticCells, idx, cxi, czi, "walls", x, z),
+      this.candidates(fineSta, this.staticCells, idx, cxi, czi, "walls", x, z),
       data,
     );
   }

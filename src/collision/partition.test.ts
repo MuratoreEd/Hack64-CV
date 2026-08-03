@@ -110,4 +110,46 @@ describe("fine-grid accel", () => {
       expect(l1).toEqual(l0);
     }
   });
+
+  it("a reduced wallReach matches plain for radii within it, and falls back beyond", () => {
+    // The probe shrinks wall inflation to its own push radius, which is what
+    // makes wall bins small enough to be fast. That is only sound if queries
+    // within the reach are unchanged and wider ones bypass the fine grid.
+    const rand = rng(0x5eed);
+    const surfaces: Surface[] = [];
+    for (let i = 0; i < 400; i++) {
+      const cx = (rand() * 2 - 1) * 9000;
+      const cz = (rand() * 2 - 1) * 9000;
+      const cy = (rand() * 2 - 1) * 2000;
+      const size = 20 + rand() * 900;
+      const v = (): [number, number, number] => [
+        Math.round(cx + (rand() * 2 - 1) * size),
+        Math.round(cy + (rand() * 2 - 1) * size),
+        Math.round(cz + (rand() * 2 - 1) * size),
+      ];
+      const s = makeSurface(v(), v(), v(), { address: 0x1000 + i * 0x30 });
+      if (s) surfaces.push(s);
+    }
+    const plain = new SpatialPartition(surfaces);
+    const REACH = 12.5; // the probe's radius on a 4× hack
+    const tight = new SpatialPartition(surfaces, { accel: true, wallReach: REACH });
+    expect(tight.wallReach).toBe(REACH);
+
+    for (let i = 0; i < 4000; i++) {
+      const x = (rand() * 2 - 1) * 8500;
+      const y = (rand() * 2 - 1) * 3000;
+      const z = (rand() * 2 - 1) * 8500;
+      // Mix radii on both sides of the reach: within it the fine grid is used,
+      // beyond it the query must fall back to the full cell list.
+      const r = i % 2 === 0 ? rand() * REACH : REACH + rand() * 190;
+      const w0 = plain.findWallCollisions(x, y, z, 30, r);
+      const w1 = tight.findWallCollisions(x, y, z, 30, r);
+      expect(w1.x).toBe(w0.x);
+      expect(w1.z).toBe(w0.z);
+      expect(w1.numWalls).toBe(w0.numWalls);
+      expect(w1.walls.map((s) => s.address)).toEqual(
+        w0.walls.map((s) => s.address),
+      );
+    }
+  });
 });

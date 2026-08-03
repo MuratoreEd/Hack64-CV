@@ -13,6 +13,7 @@
 import type { StateMessage } from "../net/protocol";
 import type { SpatialPartition } from "./partition";
 import type { Surface } from "./surface";
+import type { FloorSelect } from "./profile";
 import { toS16 } from "./queries";
 
 /**
@@ -102,12 +103,31 @@ export interface OracleOptions {
   surfaceByAddr?: Map<number, Surface>;
 }
 
+/** Plane height of a surface at a collision-space (x, z). */
+function planeHeight(s: Surface, x: number, z: number): number {
+  return -(x * s.normal.x + z * s.normal.z + s.originOffset) / s.normal.y;
+}
+
 /**
- * Detect the world→collision scale from the floor the game reports, using a flat
- * floor (|normal.y| ~ 1) whose plane height is constant, so
- *   scale = gameFloorHeight / (collision plane height).
- * Returns a clean power-of-two-ish factor, or null when it can't be determined
- * this frame (no floor, floor not in pool, sloped floor, plane through origin).
+ * Detect the world→collision scale from the floor the game reports.
+ *
+ * For each candidate scale we convert Mario's world position the way the engine
+ * does, evaluate the reported floor's PLANE at that column, and scale the
+ * result back up: the true scale is the one that reproduces the game's own
+ * floorHeight. Sloped floors work — the plane is evaluated at the column rather
+ * than assumed constant — which matters because a hack's Mario spends most of
+ * his time on slopes. (The old version required |normal.y| >= 0.99 and so
+ * returned null forever on sloped ground, silently leaving the scale at its
+ * previous value: live level 15 ran the whole probe at scale 1 instead of 4,
+ * making Mario's hitbox 4x too tall in collision units and inventing a mass of
+ * ceiling-blocked columns.)
+ *
+ * Also independent of the floor SELECTION rule (first-hit vs highest), so it
+ * stays valid on patched ROMs — it only ever asks "where is this surface's
+ * plane", never "which surface would we pick".
+ *
+ * Returns null when undeterminable this frame (no floor, floor not in our pool,
+ * or two candidates fit equally well); callers keep the previous value.
  */
 export function detectWorldScale(
   surfaces: Surface[],
@@ -115,13 +135,51 @@ export function detectWorldScale(
 ): number | null {
   if (!state.floorAddr) return null;
   const s = surfaces.find((s) => s.address === state.floorAddr);
-  if (!s || Math.abs(s.normal.y) < 0.99) return null;
-  const collisionHeight = -s.originOffset / s.normal.y;
-  if (Math.abs(collisionHeight) < 1) return null; // near origin: unreliable
-  const raw = state.floorHeight / collisionHeight;
-  let best = CLEAN_SCALES[0];
-  for (const c of CLEAN_SCALES) if (Math.abs(c - raw) < Math.abs(best - raw)) best = c;
-  return Math.abs(best - raw) < 0.05 ? best : null;
+  if (!s || s.normal.y === 0) return null;
+  const fits: { scale: number; err: number }[] = [];
+  for (const scale of CLEAN_SCALES) {
+    const cx = toCollision(state.pos.x, scale);
+    const cz = toCollision(state.pos.z, scale);
+    const err = Math.abs(planeHeight(s, cx, cz) * scale - state.floorHeight);
+    // The plane formula is the game's own, so a correct scale reproduces
+    // floorHeight to float noise; 1 world unit is generous.
+    if (err < 1) fits.push({ scale, err });
+  }
+  if (fits.length === 0) return null;
+  fits.sort((a, b) => a.err - b.err);
+  // Ambiguous (e.g. a flat floor at height 0 fits every scale): don't guess.
+  if (fits.length > 1 && fits[1].err - fits[0].err < 1e-6) return null;
+  return fits[0].scale;
+}
+
+/** What the game's reported floor tells us about its selection rule. Returns
+ * null when this frame can't distinguish them.
+ *
+ * Vanilla find_floor_from_list takes the FIRST containing floor in the cell's
+ * vertex1[1]-sorted order; a patched engine takes the HIGHEST. When those are
+ * different surfaces, the game's own pointer says which engine we're talking
+ * to. Verified live on this hack: the first-in-order floor (0x8067cb60, plane
+ * 1407.25) passes every vanilla test, yet the game reported 1464.13 — the
+ * highest of the three floors over Mario's column. */
+export function detectFloorSelect(
+  partition: SpatialPartition,
+  state: StateMessage,
+  scale: number,
+): FloorSelect | null {
+  if (!state.floorAddr) return null;
+  const cx = toCollision(state.pos.x, scale);
+  const cy = toCollision(state.pos.y, scale);
+  const cz = toCollision(state.pos.z, scale);
+  const first = partition.findFloorWith(cx, cy, cz, "first");
+  const extreme = partition.findFloorWith(cx, cy, cz, "extreme");
+  if (!first.surface || !extreme.surface) return null;
+  const firstAddr = first.surface.address >>> 0;
+  const extremeAddr = extreme.surface.address >>> 0;
+  if (firstAddr === extremeAddr) return null; // no disagreement to learn from
+  const game = state.floorAddr >>> 0;
+  if (game === extremeAddr) return "extreme";
+  if (game === firstAddr) return "first";
+  return null; // neither: a dynamic surface, or a pool/state skew
 }
 
 export function evaluateOracle(

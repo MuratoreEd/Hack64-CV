@@ -66,6 +66,46 @@ describe("findFloorFromList", () => {
   });
 });
 
+describe("floor/ceiling selection rule (CollisionProfile.select)", () => {
+  // Cell order is the caller's (the partition sorts by vertex1[1] desc). Here
+  // the LOWER floor is listed first, as happens when its first vertex outranks
+  // the other's — the decomp's own "surface cucking" comment.
+  const low = floorAt(100, { address: 0x1 });
+  const high = floorAt(200, { address: 0x2 });
+
+  it("'first' takes the first hit in list order, shadowing the higher floor", () => {
+    const hit = findFloorFromList([low, high], 0, 300, 0, "first");
+    expect(hit.surface?.address).toBe(0x1);
+    expect(hit.height).toBe(100);
+  });
+
+  it("'extreme' takes the highest floor regardless of order", () => {
+    for (const list of [[low, high], [high, low]]) {
+      const hit = findFloorFromList(list, 0, 300, 0, "extreme");
+      expect(hit.surface?.address).toBe(0x2);
+      expect(hit.height).toBe(200);
+    }
+  });
+
+  it("'extreme' still honors the 78-unit buffer", () => {
+    // The high floor sits 100 above the query point — beyond the buffer — so
+    // even "extreme" must fall back to the reachable one.
+    const hit = findFloorFromList([low, high], 0, 100, 0, "extreme");
+    expect(hit.surface?.address).toBe(0x1);
+  });
+
+  it("'extreme' takes the LOWEST ceiling (the mirror case)", () => {
+    const lowC = ceilAt(200, { address: 0x3 });
+    const highC = ceilAt(400, { address: 0x4 });
+    expect(findCeilFromList([highC, lowC], 0, 50, 0, "first").surface?.address).toBe(0x4);
+    expect(findCeilFromList([highC, lowC], 0, 50, 0, "extreme").surface?.address).toBe(0x3);
+  });
+
+  it("defaults to vanilla 'first' when no rule is given", () => {
+    expect(findFloorFromList([low, high], 0, 300, 0).surface?.address).toBe(0x1);
+  });
+});
+
 describe("findCeilFromList", () => {
   it("finds a ceiling above the query point", () => {
     const hit = findCeilFromList([ceilAt(200)], 0, 50, 0);

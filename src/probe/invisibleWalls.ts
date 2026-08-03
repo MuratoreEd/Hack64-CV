@@ -57,6 +57,7 @@
 // collision routines and stay raw (verified live against the 4× hack).
 
 import type { Surface } from "../collision/surface";
+import type { FloorSelect } from "../collision/profile";
 import { SurfaceKind, deriveLevelBounds } from "../collision/surface";
 import { SpatialPartition, deriveBoundary } from "../collision/partition";
 import {
@@ -119,6 +120,25 @@ export interface ProbeOptions {
   /** Use the partition's fine-grid pre-filter (identical results, ~10× fewer
    * candidates per query). Defaults to true; benchmarks flip it off. */
   accel?: boolean;
+  /** Run the air-step pass over ceiling edges (perform_air_quarter_step walls
+   * that ground marching cannot see). Defaults to true; A/B diagnostics and
+   * regression tests flip it off to isolate the ground pass. */
+  airPass?: boolean;
+  /** Steepness gate for the air pass: only ceilings with normal.y ABOVE this
+   * participate. Default −0.5 = steeper than 60° from horizontal, i.e. only
+   * surfaces that read as walls but are classified as ceilings. See the
+   * air-pass comment for why roofs are excluded. */
+  airMaxNormalY?: number;
+  /** Drop blocked columns that lie INSIDE solid geometry — behind the front
+   * face of a wall bounding the same structure — since nothing there is
+   * reachable and the block is the visible solid, not an invisible wall.
+   * Defaults to true; set false to see the raw step verdicts. */
+  cullInsideSolid?: boolean;
+  /** Floor/ceiling selection rule for the probe's own partition
+   * (CollisionProfile.select). Must match the running ROM — it decides both
+   * which surfaces queries resolve to and whether floorAbove treats shadowed
+   * floors as region-terminating. Defaults to "first" (vanilla). */
+  select?: FloorSelect;
 }
 
 export interface ProbeResult {
@@ -291,6 +311,13 @@ export function findInvisibleWalls(
     // grid (3.1s vs 15.9s, 7337-surface pool). Node benchmarks via tsx are
     // misleading here — its keep-names wrappers dwarf the per-query savings.
     accel: opts.accel ?? true,
+    select: opts.select ?? "first",
+    // The probe never queries walls wider than its own push radius, so the
+    // fine grid only needs to inflate wall footprints that far — the default
+    // 200 over-inflates by 16× on a 4× hack and buries every bin in walls the
+    // query can't reach. Wall lookups are the probe's hottest path (up to
+    // three per sample, millions of samples).
+    wallReach: opts.wallRadius ?? 50,
   });
   const marioHeight = opts.marioHeight ?? 160;
   const ledgeGrace = opts.ledgeGrace ?? 100;
@@ -299,6 +326,9 @@ export function findInvisibleWalls(
   const wallOffset = opts.wallOffset ?? 60;
   const wallRadius = opts.wallRadius ?? 50;
   const maxSamples = opts.maxSamplesPerEdge ?? 2048;
+  const airPass = opts.airPass ?? true;
+  const airMaxNormalY = opts.airMaxNormalY ?? -0.5;
+  const cullInsideSolid = opts.cullInsideSolid ?? true;
   // perform_air_quarter_step's wall pushes sit at +150/+30 world units (the
   // ground step uses +60) with the same 50 radius; scale like marioHeight.
   const airUpperOffset = (150 / 160) * marioHeight;
@@ -345,14 +375,23 @@ export function findInvisibleWalls(
    * narrow crack from an intentional level-boundary void).
    */
   /** Lowest floor plane above `y` that ACTUALLY ends the blocked region, or
-   * the sky cap. A floor above only resets find_floor if find_floor RESOLVES
-   * to it — the cell sort (vertices[0].y desc, first-hit-wins) can shadow a
-   * floor behind one sorted earlier whose plane sits far lower at this column
-   * (the floor-overlap bug). A shadowed floor never truncates: queries from
-   * above it still fall through to the low floor, keep finding the blocking
-   * ceiling, and stay blocked. Verified live (alcove slab whose top floor is
-   * shadowed by a ramp → air/ground steps blocked hundreds of units above
-   * the slab, far past the old geometric cap). */
+   * the sky cap.
+   *
+   * Under VANILLA first-hit-wins selection, a floor above only resets
+   * find_floor if find_floor RESOLVES to it: the cell sort (vertices[0].y
+   * desc) can shadow a floor behind one sorted earlier whose plane sits far
+   * lower at this column (the floor-overlap bug), and a shadowed floor never
+   * truncates — queries from above it still fall through to the low floor,
+   * keep finding the blocking ceiling, and stay blocked. Verified live on a
+   * scale-4 hack (alcove slab whose top floor is shadowed by a ramp → steps
+   * blocked hundreds of units above the slab, far past the geometric cap).
+   *
+   * Under "extreme" selection the shadowing cannot happen — the engine scans
+   * the whole list and takes the highest floor — so every geometrically
+   * present floor above truncates, and the resolve check must NOT be applied.
+   * Applying it anyway sent regions to the sky cap all over a patched ROM's
+   * level: the "huge invisible walls" report that uncovered this. */
+  const shadowAware = partition.select === "first";
   const aFloor = { surface: null, height: 0 } as ReturnType<typeof partition.findFloor>;
   const floorAbove = (x: number, z: number, y: number): number => {
     const above = partition
@@ -360,10 +399,95 @@ export function findInvisibleWalls(
       .filter((f) => f.height > y)
       .sort((a, b) => a.height - b.height);
     for (const f of above) {
+      if (!shadowAware) return f.height;
       partition.findFloorInto(x, f.height + 1, z, aFloor);
       if (aFloor.surface && aFloor.height >= f.height - 0.01) return f.height;
     }
     return skyCap;
+  };
+
+  /**
+   * Does stepping from the walkable column to the target cross INTO solid
+   * geometry? True when a wall's front face lies between them, meaning the
+   * target sits behind the shell of the structure whose ceiling is blocking.
+   *
+   * Why this is worth culling, and why the existing wall-cap logic misses it
+   * (verified live, level 15 world (-5304, 1432, 812)): a solid wedge had its
+   * sloped underside (ceiling, ny -0.632) meeting its own west wall exactly at
+   * x = -1326 — a properly sealed solid, nothing leaking. Mario on the floor at
+   * y 358 with the underside at 379 doesn't fit (needs 40), so the ground step
+   * is genuinely blocked; but the wedge's west wall spans y 379..609, entirely
+   * ABOVE his +15/+60 push offsets, so no wall engages and the seam reads as
+   * uncapped. The region then ran from his feet up through the wedge's solid
+   * interior to its roof. Nothing about that is invisible — you can see the ramp
+   * is too low. The genuine pathology is the opposite geometry: a ceiling whose
+   * footprint LEAKS past its bounding wall, leaving you blocked in open air
+   * BESIDE the structure, where the approach and the target are both outside
+   * the shell and this test finds no crossing.
+   *
+   * Deliberately height-agnostic about Mario (the bounding wall is usually
+   * above him) but not about the region: the wall must span some of the blocked
+   * interval it is supposed to be enclosing, so an unrelated wall elsewhere in
+   * the column can't cull a real ground-level wall.
+   */
+  // One-entry memo: sampling walks an edge, so consecutive samples land in the
+  // same blocked cell with the same interval far more often than not, and the
+  // verdict is a pure function of those. Wall bins hold ~100 surfaces, so not
+  // re-scanning is worth more than the comparison costs.
+  let memoX = NaN;
+  let memoZ = NaN;
+  let memoWX = NaN;
+  let memoWZ = NaN;
+  let memoLow = NaN;
+  let memoHigh = NaN;
+  let memoVerdict = false;
+
+  const entersSolid = (
+    wx: number,
+    wz: number,
+    tx: number,
+    tz: number,
+    yLow: number,
+    yHigh: number,
+  ): boolean => {
+    if (
+      tx === memoX && tz === memoZ && wx === memoWX && wz === memoWZ &&
+      yLow === memoLow && yHigh === memoHigh
+    ) {
+      return memoVerdict;
+    }
+    const walls = partition.wallsAt(tx, tz);
+    // Region mid-height: walls are near-vertical, so the ny term barely
+    // participates, and one height serves the whole interval.
+    const yMid = (yLow + yHigh) / 2;
+    let verdict = false;
+    for (let i = 0; i < walls.length; i++) {
+      const w = walls[i];
+      // Cheapest rejections first — the bin is dominated by walls nowhere near
+      // this column (the fine grid inflates wall footprints by the push reach).
+      if (w.upperY < yLow || w.lowerY > yHigh) continue;
+      if (w.type === SURFACE_CAMERA_BOUNDARY) continue;
+      const v = w.vertices;
+      const ax = v[0][0], bx2 = v[1][0], cx2 = v[2][0];
+      if (tx + 1 < (ax < bx2 ? (ax < cx2 ? ax : cx2) : (bx2 < cx2 ? bx2 : cx2))) continue;
+      if (tx - 1 > (ax > bx2 ? (ax > cx2 ? ax : cx2) : (bx2 > cx2 ? bx2 : cx2))) continue;
+      const az = v[0][2], bz2 = v[1][2], cz2 = v[2][2];
+      if (tz + 1 < (az < bz2 ? (az < cz2 ? az : cz2) : (bz2 < cz2 ? bz2 : cz2))) continue;
+      if (tz - 1 > (az > bz2 ? (az > cz2 ? az : cz2) : (bz2 > cz2 ? bz2 : cz2))) continue;
+      // Front (positive) side to back (non-positive) = entering the solid. The
+      // reverse means the walkable side was already inside, which a marched
+      // floor/ceiling edge shouldn't be, and equality means neither point moved
+      // relative to the plane.
+      const n = w.normal;
+      const base = yMid * n.y + w.originOffset;
+      if (!(wx * n.x + wz * n.z + base > 0)) continue;
+      if (tx * n.x + tz * n.z + base > 0) continue;
+      verdict = true;
+      break;
+    }
+    memoX = tx; memoZ = tz; memoWX = wx; memoWZ = wz;
+    memoLow = yLow; memoHigh = yHigh; memoVerdict = verdict;
+    return verdict;
   };
 
   const checkStep = (
@@ -436,7 +560,25 @@ export function findInvisibleWalls(
    * Air-only invisible walls (perform_air_quarter_step): tried at ceiling-edge
    * samples where the GROUND step passed. Tested just above the marched
    * ceiling's highest vertex — where blocked collision is, by definition, not
-   * explained by the visible surface. Two things keep legit solids silent:
+   * explained by the visible surface.
+   *
+   * STEEPNESS GATE (airMaxNormalY, default −0.5). Only ceilings steeper than
+   * 60° from horizontal participate. The column above ANY ceiling is blocked
+   * until a floor resets find_floor — that is universal SM64 behavior (find_
+   * floor ignores ceilings), true of every roof in every level including
+   * vanilla, and it is co-located with obvious visible geometry: Mario is
+   * directly over a solid roof. Reporting it buries the real findings (live
+   * level 15: flat roofs produced 34233 of 36679 air columns, 14× everything
+   * else) and flags no defect. A near-VERTICAL ceiling is the opposite: its
+   * normal.y sits just past the engine's ±0.01 wall cutoff, so the author drew
+   * a wall and the engine kept a roof — and its blocked band stands in open
+   * air far from the thin sliver of geometry that causes it. That is the
+   * "slams into nothing" pathology this probe exists to find (verified live:
+   * ny −0.069, band ~2800 units above the triangle's own top edge).
+   * The ground pass is unaffected — flat roofs keep every ground detection
+   * they had (12667 columns on that level, including all roofed-drop rims).
+   *
+   * Two further filters keep legit solids silent:
    *   - the air wall pushes (150/30, radius 50): a solid box's side walls cap
    *     horizontal entry whenever the box is thicker than the lower push
    *     offset (30), exactly as in the game;
@@ -485,6 +627,10 @@ export function findInvisibleWalls(
     if (!tCeil.surface) return null;
     if (!(yTest + marioHeight > tCeil.height)) return null;
     const cSurf = tCeil.surface;
+    // The surface actually walling Mario must be the wall-like kind (see the
+    // steepness gate above) — a roof resolved here is ordinary engine
+    // behavior even when the marched edge belonged to a steep neighbor.
+    if (cSurf.normal.y <= airMaxNormalY) return null;
     const cTop = Math.max(
       cSurf.vertices[0][1],
       cSurf.vertices[1][1],
@@ -528,6 +674,10 @@ export function findInvisibleWalls(
     // Highest vertex of the marched ceiling: the air check tests just above
     // it, where blocking cannot be explained by the surface itself.
     const surfTopY = Math.max(a[1], b[1], c[1]);
+    // Steepness gate (see checkAirStep): roofs are skipped outright, so the
+    // air queries never run for the overwhelming majority of ceiling edges.
+    const airStepEdge =
+      airPass && walkSide === "out" && surf.normal.y > airMaxNormalY;
 
     // Unit perpendicular oriented toward the third vertex (footprint inside).
     let px = -dz / len;
@@ -624,10 +774,12 @@ export function findInvisibleWalls(
           }
         }
       }
-      // Air pass, ceiling edges only, and only where the ground step found
-      // nothing (never double-flags a cell). Runs even when there is no
+      // Air pass, steep ceiling edges only, and only where the ground step
+      // found nothing (never double-flags a cell). Runs even when there is no
       // standable approach under the ceiling — airborne Mario needs none.
-      if (!block && walkSide === "out") {
+      // A steep ceiling's band lives over its own footprint, so marching that
+      // ceiling reaches it; gating here also skips the queries for every roof.
+      if (!block && airStepEdge) {
         for (let t = 0; t < nTargets; t++) {
           block = checkAirStep(targetX[t], targetZ[t], wx, wz, surfTopY);
           if (block) {
@@ -638,6 +790,11 @@ export function findInvisibleWalls(
         }
       }
       if (!block) continue;
+      // Unreachable interior of a sealed structure: the block is the visible
+      // solid, not an invisible wall.
+      if (cullInsideSolid && entersSolid(wx, wz, bx, bz, block.yLow, block.yHigh)) {
+        continue;
+      }
       // Where Mario "stands" when he hits it: the walkable-side floor, or for
       // an air-only wall with no standable approach, the region's own base.
       const base = Number.isNaN(floorH) ? block.yLow : floorH;

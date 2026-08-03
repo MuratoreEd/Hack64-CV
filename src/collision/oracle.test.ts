@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { makeSurface } from "./geometry";
 import { SpatialPartition } from "./partition";
-import { evaluateOracle } from "./oracle";
+import { evaluateOracle, detectWorldScale, detectFloorSelect } from "./oracle";
 import type { Surface } from "./surface";
 import type { StateMessage } from "../net/protocol";
 
@@ -144,5 +144,96 @@ describe("evaluateOracle floor/ceil coplanar siblings", () => {
     });
     expect(r.floor.ok).toBe(true);
     expect(r.floor.coplanar).toBe(false);
+  });
+});
+
+describe("detectWorldScale", () => {
+  // A SLOPED floor in collision space: at collision (10, -10) its plane sits at
+  // y = 105, so a 4x hack reports floorHeight 420 with Mario at world (40, ?, -40).
+  const slope = makeSurface([-200, 0, -200], [-200, 0, 200], [200, 400, 200], {
+    address: 0x5100,
+  })!;
+  const planeAt = (s: Surface, x: number, z: number) =>
+    -(x * s.normal.x + z * s.normal.z + s.originOffset) / s.normal.y;
+
+  const stateAt = (scale: number): StateMessage => ({
+    ...state(0),
+    // Collision column (10, -10) at the given scale.
+    pos: { x: 10 * scale, y: 500 * scale, z: -10 * scale },
+    floorAddr: 0x5100,
+    floorHeight: planeAt(slope, 10, -10) * scale,
+  });
+
+  it("detects the scale from a SLOPED floor (the level-15 blind spot)", () => {
+    // The old detector required |normal.y| >= 0.99 and returned null here, so a
+    // hack whose Mario stands on slopes never had its scale corrected — the
+    // probe then ran with a 4x-too-tall hitbox and invented ceiling collisions.
+    for (const scale of [1, 2, 4, 8]) {
+      expect(detectWorldScale([slope], stateAt(scale))).toBe(scale);
+    }
+  });
+
+  it("returns null when the floor isn't in our pool", () => {
+    expect(detectWorldScale([], stateAt(4))).toBeNull();
+  });
+
+  it("returns null rather than guessing when scales are indistinguishable", () => {
+    // A flat floor whose plane is y = 0: height 0 * any scale = 0, so every
+    // candidate fits and the answer would be arbitrary.
+    const flat = makeSurface([-200, 0, -200], [-200, 0, 200], [200, 0, 200], {
+      address: 0x5200,
+    })!;
+    const s: StateMessage = {
+      ...state(0),
+      pos: { x: 10, y: 50, z: -10 },
+      floorAddr: 0x5200,
+      floorHeight: 0,
+    };
+    expect(detectWorldScale([flat], s)).toBeNull();
+  });
+});
+
+describe("detectFloorSelect", () => {
+  // The live shape from this hack's level 15: two overlapping floors where the
+  // one sorted FIRST (higher vertex1[1]) has the LOWER plane at the query
+  // column, so vanilla first-hit-wins and a cucking-fixed engine disagree.
+  //   shadower: vertex1.y = 300, plane at (0,0) = 100
+  //   higher:   vertex1.y = 200, plane at (0,0) = 200 (flat)
+  const shadower = makeSurface([-100, 300, -100], [-100, 100, 100], [100, 100, 100], {
+    address: 0x9100,
+  })!;
+  const higher = makeSurface([-100, 200, -100], [-100, 200, 100], [100, 200, 100], {
+    address: 0x9200,
+  })!;
+  const partition = () => new SpatialPartition([shadower, higher]);
+  const at = (floorAddr: number): StateMessage => ({
+    ...state(0),
+    pos: { x: -20, y: 260, z: 20 },
+    floorAddr,
+  });
+
+  it("precondition: the two rules really do disagree here", () => {
+    const p = partition();
+    const first = p.findFloorWith(-20, 260, 20, "first");
+    const extreme = p.findFloorWith(-20, 260, 20, "extreme");
+    expect(first.surface?.address).toBe(0x9100);
+    expect(extreme.surface?.address).toBe(0x9200);
+    expect(extreme.height).toBeGreaterThan(first.height);
+  });
+
+  it("reads 'extreme' when the game reports the highest floor", () => {
+    expect(detectFloorSelect(partition(), at(0x9200), 1)).toBe("extreme");
+  });
+
+  it("reads 'first' when the game reports the first-in-sort floor", () => {
+    expect(detectFloorSelect(partition(), at(0x9100), 1)).toBe("first");
+  });
+
+  it("stays silent when the rules agree, or the floor is neither", () => {
+    // Single floor: nothing to learn.
+    const one = new SpatialPartition([higher]);
+    expect(detectFloorSelect(one, at(0x9200), 1)).toBeNull();
+    // A pointer we don't recognize (dynamic surface / pool skew).
+    expect(detectFloorSelect(partition(), at(0xdead), 1)).toBeNull();
   });
 });

@@ -5,7 +5,17 @@ import { Viewer } from "./viewer/viewer";
 import { createHud } from "./viewer/hud";
 import { demoScene } from "./collision/synthetic";
 import { SpatialPartition } from "./collision/partition";
-import { evaluateOracle, detectWorldScale } from "./collision/oracle";
+import {
+  evaluateOracle,
+  detectWorldScale,
+  detectFloorSelect,
+} from "./collision/oracle";
+import {
+  VANILLA_PROFILE,
+  PATCHED_PROFILE,
+  type FloorSelect,
+} from "./collision/profile";
+import { detectWallThreshold } from "./collision/patchDetect";
 import type { ProbeResult } from "./probe/invisibleWalls";
 import type { ProbeRequest } from "./probe/worker";
 import type { Surface } from "./collision/surface";
@@ -62,8 +72,47 @@ let liveSurfaces: Surface[] = [];
 // wall for the coplanar-sibling check even when we didn't detect it ourselves.
 let surfaceByAddr = new Map<number, Surface>();
 // World→collision scale (some hacks store collision at 1/scale of Mario's world
-// coords). Detected from a flat floor; sticky until a new value is confirmed.
+// coords). Detected from the game's reported floor; sticky until a new value is
+// confirmed.
 let worldScale = 1;
+// Which collision engine the running ROM is. ROM-level collision patches change
+// real behavior (see collision/profile.ts), so the core has to know which one
+// it's imitating. Two independent live signals feed this:
+//   - patchDetect.detectWallThreshold reads the game's own partition lists out
+//     of each RDRAM snapshot. Position-independent, so it settles the question
+//     on any level that has a disputed-band surface — this is the primary one,
+//     and it re-runs per level/area, which is what makes a ROM reload or a
+//     switch to a different ROM re-identify instead of inheriting a stale
+//     verdict.
+//   - oracle.detectFloorSelect watches for the two selection rules disagreeing
+//     over Mario's column. Rarely available (needs overlapping floors) but it
+//     observes the selection rule DIRECTLY rather than inferring it from the
+//     threshold, so when it does speak it wins.
+let floorSelect: FloorSelect = VANILLA_PROFILE.select;
+// Set once either signal has spoken; until then the HUD says nothing rather
+// than claiming "vanilla".
+let profileKnown = false;
+// True when the verdict came from detectFloorSelect, which measures selection
+// directly — the threshold-based inference must not overwrite it.
+let selectObserved = false;
+const profile = () => (floorSelect === "extreme" ? PATCHED_PROFILE : VANILLA_PROFILE);
+
+/** Apply a new engine verdict: re-classify the pool under the new threshold
+ * (classification is a parse-time decision), which re-fires onSurfaces and so
+ * rebuilds the partition and re-probes. No-op when nothing actually changes. */
+function applyProfile(select: FloorSelect, observed: boolean): void {
+  const changed = !profileKnown || select !== floorSelect;
+  profileKnown = true;
+  if (observed) selectObserved = true;
+  if (!changed) return;
+  floorSelect = select;
+  debug.floorSelect = select;
+  client.setWallThreshold(profile().wallThreshold);
+  if (liveSurfaces.length > 0) {
+    partition = new SpatialPartition(liveSurfaces, { select: floorSelect });
+    runProbe();
+  }
+}
 // Previous frame's Mario position, to tell whether he moved. When he didn't, the
 // game leaves gMarioState->wall stale, so the wall oracle can't be checked.
 let prevPos: { x: number; y: number; z: number } | null = null;
@@ -93,7 +142,7 @@ let reframeUntil = 0;
 
 function runProbe(): void {
   if (!partition) return;
-  const key = `${liveSurfaces.length}:${partition.boundary}:${worldScale}`;
+  const key = `${liveSurfaces.length}:${partition.boundary}:${worldScale}:${floorSelect}`;
   if (key === probedKey) return;
   probedKey = key;
   if (!probeWorker) {
@@ -123,6 +172,7 @@ function runProbe(): void {
       wallOffset: 60 / worldScale,
       wallRadius: 50 / worldScale,
       boundary: partition.boundary,
+      select: floorSelect,
     },
   };
   probeWorker.postMessage(request);
@@ -148,7 +198,7 @@ const client = new LiveClient(bridgeUrl, {
     viewer.setSurfaces(surfaces);
     if (Date.now() < reframeUntil) viewer.reframe();
     hud.setCounts(viewer.counts);
-    partition = new SpatialPartition(surfaces);
+    partition = new SpatialPartition(surfaces, { select: floorSelect });
     debug.surfaces = surfaces;
     debug.partition = partition;
     runProbe();
@@ -157,6 +207,24 @@ const client = new LiveClient(bridgeUrl, {
     // Dev hook: lets DL-level issues be probed in-page (don't retain the
     // 8 MB snapshot in prod, where __ivw isn't exposed anyway).
     if (import.meta.env.DEV) debug.rdram = bytes;
+    // Re-identify the collision engine from the game's own partition on every
+    // snapshot (once per level/area, and after a ROM reload or swap). A level
+    // with no disputed-band surfaces yields null — keep the current belief
+    // rather than falling back to vanilla. A directly-observed selection rule
+    // is never overwritten by this inference.
+    if (liveSurfaces.length === 0) {
+      // Snapshot beat the first surface pool: nothing to correlate it against.
+      // Clearing the key makes the next state frame re-request it.
+      gfxKey = "";
+    }
+    const patch = detectWallThreshold(bytes, liveSurfaces);
+    debug.patchDetection = patch;
+    if (patch.wallThreshold !== null && !selectObserved) {
+      applyProfile(
+        patch.wallThreshold === PATCHED_PROFILE.wallThreshold ? "extreme" : "first",
+        false,
+      );
+    }
     const model = buildLevelModel(bytes);
     viewer.setLevelModel(model);
     hud.setTexturedAvailable(model !== null);
@@ -167,11 +235,23 @@ const client = new LiveClient(bridgeUrl, {
   onState: (state) => {
     const detected = detectWorldScale(liveSurfaces, state);
     if (detected) worldScale = detected;
+    // Direct observation of the selection rule, when the geometry under Mario
+    // happens to expose it. Outranks the threshold-based inference.
+    if (partition) {
+      const verdict = detectFloorSelect(partition, state, worldScale);
+      if (verdict) applyProfile(verdict, true);
+    }
+    hud.setProfile(floorSelect === "extreme" ? "patched" : "vanilla", profileKnown);
     viewer.setModelScale(worldScale);
     const nextGfxKey = `${state.level}:${state.area}`;
     if (nextGfxKey !== gfxKey) {
       gfxKey = nextGfxKey;
       client.send({ type: "rdram" });
+      // A new level (including one reached by reloading or swapping the ROM)
+      // gets to re-earn the direct selection observation, so the fresh
+      // snapshot's verdict isn't blocked by one from the previous ROM. The
+      // current belief stays as the fallback until something contradicts it.
+      selectObserved = false;
       // A real level/area change: snap the camera to the new level (and let
       // the surface pools arriving over the next moments do the same, in
       // case they land after this state frame).

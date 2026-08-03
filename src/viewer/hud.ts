@@ -73,6 +73,9 @@ export interface Hud {
   setFogAvailable(available: boolean): void;
   /** Show/hide the "probing…" banner while probe runs are in flight. */
   setProbeBusy(busy: boolean): void;
+  /** Which collision engine the ROM was identified as, and whether that's
+   * confirmed (vs the unproven default). */
+  setProfile(name: "vanilla" | "patched", latched: boolean): void;
 }
 
 export function createHud(
@@ -109,6 +112,13 @@ export function createHud(
   const context = document.createElement("div");
   context.className = "context";
   hud.appendChild(context);
+
+  // Which collision engine the ROM runs — a ROM-level collision patch changes
+  // real query behavior, so this drives the whole core and is worth surfacing.
+  const profileLine = document.createElement("div");
+  profileLine.className = "context";
+  profileLine.style.display = "none";
+  hud.appendChild(profileLine);
 
   // "core vs game" oracle panel: headline verdict + one line per query.
   const oracle = document.createElement("div");
@@ -418,6 +428,17 @@ export function createHud(
     },
     setProbeBusy(busy) {
       probing.style.display = busy ? "" : "none";
+    },
+    setProfile(name, latched) {
+      if (!latched) {
+        profileLine.style.display = "none";
+        return;
+      }
+      profileLine.style.display = "";
+      profileLine.textContent =
+        name === "patched"
+          ? "Frame's patch detected"
+          : "collision: vanilla (unpatched)";
     },
   };
 }

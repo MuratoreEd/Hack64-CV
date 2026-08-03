@@ -15,6 +15,7 @@
 //    ~1e-3 and can flip the ±78 buffer only when Mario is right on the threshold.
 
 import type { Surface } from "./surface";
+import type { FloorSelect } from "./profile";
 import {
   FLOOR_LOWER_LIMIT,
   CELL_HEIGHT_LIMIT,
@@ -69,18 +70,21 @@ export function floorContainsXZ(surf: Surface, x: number, z: number): boolean {
 
 /**
  * Port of `find_floor_from_list`. `x`,`y`,`z` are already s16-truncated ints.
- * Returns the FIRST surface in list order whose XZ footprint contains (x,z) and
- * whose plane is within 78 units above y — preserving first-hit-wins (the
- * floor-overlap bug). Height defaults to FLOOR_LOWER_LIMIT when nothing hits.
+ * Considers surfaces whose XZ footprint contains (x,z) and whose plane is
+ * within 78 units above y. `select` "first" (default) returns the FIRST in list
+ * order — vanilla, preserving first-hit-wins (the floor-overlap bug);
+ * "extreme" returns the HIGHEST, matching ROMs whose collision patch fixes it.
+ * Height defaults to FLOOR_LOWER_LIMIT when nothing hits.
  */
 export function findFloorFromList(
   list: Surface[],
   x: number,
   y: number,
   z: number,
+  select: FloorSelect = "first",
 ): SurfaceHit {
   const out: SurfaceHit = { surface: null, height: 0 };
-  findFloorFromListInto(list, x, y, z, out);
+  findFloorFromListInto(list, x, y, z, out, select);
   return out;
 }
 
@@ -92,9 +96,17 @@ export function findFloorFromListInto(
   y: number,
   z: number,
   out: SurfaceHit,
+  select: FloorSelect = "first",
 ): void {
+  out.surface = null;
+  const extreme = select === "extreme"; // hoisted: this loop runs ~10^8 times
   for (let i = 0; i < list.length; i++) {
     const surf = list[i];
+    // "extreme" must scan the whole list, which makes the containment test the
+    // probe's hottest cost. A floor's plane inside its own triangle is a convex
+    // combination of its vertex heights, so it can never exceed upperY: one
+    // integer compare discards any candidate that cannot beat the current best.
+    if (extreme && out.surface !== null && surf.upperY <= out.height) continue;
     if (!floorContainsXZ(surf, x, z)) continue;
 
     // Not checking for the camera: ignore camera-only floors.
@@ -107,12 +119,21 @@ export function findFloorFromListInto(
     // 78-unit buffer: skip floors more than 78 units above y.
     if (y - (height + -SURFACE_Y_BUFFER) < 0) continue;
 
-    out.surface = surf;
-    out.height = height;
-    return;
+    // Vanilla returns the first hit — the surface-cucking bug, since the cell
+    // is sorted by vertex1[1] and a triangle's first vertex isn't its highest.
+    // "extreme" keeps scanning for the HIGHEST floor (patched ROMs; see
+    // CollisionProfile).
+    if (select === "first") {
+      out.surface = surf;
+      out.height = height;
+      return;
+    }
+    if (out.surface === null || height > out.height) {
+      out.surface = surf;
+      out.height = height;
+    }
   }
-  out.surface = null;
-  out.height = FLOOR_LOWER_LIMIT;
+  if (out.surface === null) out.height = FLOOR_LOWER_LIMIT;
 }
 
 /**
@@ -124,9 +145,10 @@ export function findCeilFromList(
   x: number,
   y: number,
   z: number,
+  select: FloorSelect = "first",
 ): SurfaceHit {
   const out: SurfaceHit = { surface: null, height: 0 };
-  findCeilFromListInto(list, x, y, z, out);
+  findCeilFromListInto(list, x, y, z, out, select);
   return out;
 }
 
@@ -137,9 +159,15 @@ export function findCeilFromListInto(
   y: number,
   z: number,
   out: SurfaceHit,
+  select: FloorSelect = "first",
 ): void {
+  out.surface = null;
+  const extreme = select === "extreme"; // hoisted: this loop runs ~10^8 times
   for (let i = 0; i < list.length; i++) {
     const surf = list[i];
+    // Mirror of the floor short-circuit: a ceiling's plane inside its triangle
+    // can never fall below lowerY, so it cannot beat the current lowest.
+    if (extreme && out.surface !== null && surf.lowerY >= out.height) continue;
     const x1 = surf.vertices[0][0];
     const z1 = surf.vertices[0][2];
     const x2 = surf.vertices[1][0];
@@ -160,12 +188,18 @@ export function findCeilFromListInto(
     // 78-unit buffer: skip ceilings more than 78 units below y.
     if (y - (height - -SURFACE_Y_BUFFER) > 0) continue;
 
-    out.surface = surf;
-    out.height = height;
-    return;
+    // Mirror of the floor case: "extreme" keeps the LOWEST ceiling.
+    if (select === "first") {
+      out.surface = surf;
+      out.height = height;
+      return;
+    }
+    if (out.surface === null || height < out.height) {
+      out.surface = surf;
+      out.height = height;
+    }
   }
-  out.surface = null;
-  out.height = CELL_HEIGHT_LIMIT;
+  if (out.surface === null) out.height = CELL_HEIGHT_LIMIT;
 }
 
 /** Mutable state threaded through find_wall_collisions (mirrors WallCollisionData).

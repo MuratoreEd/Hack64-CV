@@ -13,6 +13,24 @@ import {
   SURFACE_FLAG_DYNAMIC,
 } from "./constants";
 
+describe("classifyKind wall threshold (CollisionProfile.wallThreshold)", () => {
+  it("uses the vanilla ±0.01 cutoff by default", () => {
+    expect(classifyKind(0.03)).toBe(SurfaceKind.Floor);
+    expect(classifyKind(-0.03)).toBe(SurfaceKind.Ceiling);
+    expect(classifyKind(0.005)).toBe(SurfaceKind.Wall);
+  });
+
+  it("sends the disputed band to walls at the patched ±0.05 cutoff", () => {
+    // Frame's collision patch raises the cutoff; confirmed live by reading the
+    // game's own partition lists, where |ny| in [0.01, 0.05) sat in wall lists.
+    expect(classifyKind(0.03, 0.05)).toBe(SurfaceKind.Wall);
+    expect(classifyKind(-0.03, 0.05)).toBe(SurfaceKind.Wall);
+    // Steeper than the band is still a floor/ceiling either way.
+    expect(classifyKind(0.78, 0.05)).toBe(SurfaceKind.Floor);
+    expect(classifyKind(-1, 0.05)).toBe(SurfaceKind.Ceiling);
+  });
+});
+
 interface SurfaceSpec {
   type?: number;
   force?: number;
