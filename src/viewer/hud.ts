@@ -49,6 +49,9 @@ const ORDER: SurfaceKind[] = [
 
 export interface HudCallbacks {
   onConnect(): void;
+  /** Save a ground-truth label at Mario's current position (corpus capture).
+   * Returns what to show the user; throws are reported in the same line. */
+  onCaptureLabel?(label: "wall" | "clear", note: string): Promise<string>;
 }
 
 export interface Hud {
@@ -77,6 +80,8 @@ export interface Hud {
   /** Which collision engine the ROM was identified as, and whether that's
    * confirmed (vs the unproven default). */
   setProfile(name: "vanilla" | "patched", latched: boolean): void;
+  /** Enable the ground-truth capture panel (needs a live pool + position). */
+  setCaptureReady(ready: boolean): void;
 }
 
 export function createHud(
@@ -302,6 +307,60 @@ export function createHud(
   inspector.append(inspTitle, inspBody);
   hud.appendChild(inspector);
 
+  // Ground-truth capture (corpus labelling). Only built when a capture handler
+  // is supplied — the dev page, or the exe launched with ?capture=1. Saves what
+  // the user knows about the spot Mario is standing on, with the surface pool
+  // that produced it, so the claim can be replayed offline forever.
+  const capture = document.createElement("div");
+  capture.className = "capture";
+  capture.style.display = "none";
+  let captureReady = false;
+  const captureNote = document.createElement("input");
+  const captureWall = document.createElement("button");
+  const captureClear = document.createElement("button");
+  const captureStatus = document.createElement("div");
+  if (callbacks.onCaptureLabel) {
+    const capTitle = document.createElement("div");
+    capTitle.className = "insp-title";
+    capTitle.textContent = "Ground truth";
+    captureNote.type = "text";
+    captureNote.placeholder = "what happens here (required)";
+    captureNote.className = "capture-note";
+    captureWall.textContent = "Wall here";
+    captureClear.textContent = "Clear here";
+    captureStatus.className = "hint";
+    const row = document.createElement("div");
+    row.className = "capture-row";
+    row.append(captureWall, captureClear);
+    capture.append(capTitle, captureNote, row, captureStatus);
+    hud.appendChild(capture);
+
+    const save = (label: "wall" | "clear") => {
+      const note = captureNote.value.trim();
+      if (!note) {
+        captureStatus.textContent = "add a note first — it's the evidence";
+        captureNote.focus();
+        return;
+      }
+      captureStatus.textContent = "saving…";
+      callbacks
+        .onCaptureLabel?.(label, note)
+        .then((msg) => {
+          captureStatus.textContent = msg;
+          captureNote.value = "";
+        })
+        .catch((err: unknown) => {
+          captureStatus.textContent = `failed: ${(err as Error).message}`;
+        });
+    };
+    captureWall.addEventListener("click", () => save("wall"));
+    captureClear.addEventListener("click", () => save("clear"));
+    // Typing a note must not fly the camera through the level.
+    for (const ev of ["keydown", "keyup"] as const) {
+      captureNote.addEventListener(ev, (e) => e.stopPropagation());
+    }
+  }
+
   // Fly-speed slider: log₂ scale so slow (⅛×) and fast (8×) get equal travel.
   const speedLabel = document.createElement("label");
   speedLabel.className = "speed";
@@ -445,6 +504,13 @@ export function createHud(
         name === "patched"
           ? "Frame's patch detected"
           : "collision: vanilla (unpatched)";
+    },
+    setCaptureReady(ready) {
+      if (!callbacks.onCaptureLabel || ready === captureReady) return;
+      captureReady = ready;
+      capture.style.display = ready ? "" : "none";
+      captureWall.disabled = !ready;
+      captureClear.disabled = !ready;
     },
   };
 }

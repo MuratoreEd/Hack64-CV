@@ -232,3 +232,43 @@ canvas {
   color: #9aa0ad;
   white-space: pre-line;
 }
+
+/* Ground-truth capture panel (corpus labelling; dev page or ?capture=1). */
+.hud .capture {
+  margin: 10px 0 2px;
+  padding: 7px 10px;
+  background: rgba(255, 255, 255, 0.05);
+  border-left: 3px solid #38bdf8;
+  border-radius: 4px;
+}
+
+.hud .capture-note {
+  width: 100%;
+  margin: 2px 0 4px;
+  padding: 4px 6px;
+  background: #12141c;
+  color: #e6e8ee;
+  border: 1px solid #2a2e3a;
+  border-radius: 4px;
+  font-size: 11px;
+}
+
+.hud .capture-row {
+  display: flex;
+  gap: 6px;
+}
+
+.hud .capture-row button {
+  margin: 0;
+  padding: 4px 6px;
+  font-size: 11px;
+  background: #0e7490;
+}
+
+.hud .capture-row button:hover {
+  background: #155e75;
+}
+
+.hud .capture .hint {
+  margin-top: 5px;
+}

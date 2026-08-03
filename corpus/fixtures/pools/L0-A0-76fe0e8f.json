@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "level": 0,
+  "area": 0,
+  "capturedAt": "2026-08-02T00:00:00.000Z",
+  "worldScale": 1,
+  "profile": {
+    "wallThreshold": 0.01,
+    "select": "first",
+    "known": true
+  },
+  "pool": {
+    "count": 4,
+    "poolBase": 2151214748,
+    "encoding": "gzip+base64",
+    "data": "H4sIAAAAAAAACmNgAIH/vxlY/1swMPy3AJEMJxhOgEkGBgb7BrACBigFBQj1UJUnQOwGnOoZ4hky/1swpIBNT2E4AWJDzN8PVeh0Ard6mC5s6gFtv2glwAAAAA=="
+  }
+}

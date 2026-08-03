@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "appVersion": "1.2.0",
+  "capturedAt": "2026-08-02T00:00:00.000Z",
+  "level": 0,
+  "area": 0,
+  "worldScale": 1,
+  "profile": {
+    "wallThreshold": 0.01,
+    "select": "first",
+    "known": true
+  },
+  "marioWorldPos": {
+    "x": 150,
+    "y": 0,
+    "z": 100
+  },
+  "label": "clear",
+  "note": "synthetic: open floor well east of the ceiling's footprint; nothing may be reported here",
+  "poolFile": "L0-A0-76fe0e8f.json"
+}

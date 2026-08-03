@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "appVersion": "1.2.0",
+  "capturedAt": "2026-08-02T00:00:00.000Z",
+  "level": 0,
+  "area": 0,
+  "worldScale": 1,
+  "profile": {
+    "wallThreshold": 0.01,
+    "select": "first",
+    "known": true
+  },
+  "marioWorldPos": {
+    "x": 30,
+    "y": 0,
+    "z": 0
+  },
+  "label": "wall",
+  "note": "synthetic: walking west into the uncapped edge of a 100-high ceiling; Mario is 160 tall so the columns past x=0 are blocked with no wall there",
+  "poolFile": "L0-A0-76fe0e8f.json"
+}

@@ -123,10 +123,17 @@ geometry rather than hardcoded, so boundary-extended hacks work correctly.
 
 ```bash
 npm test          # collision-core + probe unit tests
+npm run corpus    # replay the ground-truth corpus (see corpus/README.md)
 npm run dev       # Vite dev server (viewer)
 npm run build     # type-check + production build
 npm run build:exe # package the standalone exe (dist-exe/InvisibleWallViewer.exe)
 ```
+
+`npm test` is the fast suite. **`npm run corpus` is the gate for any change to
+the probe or the collision core**: it replays hand-labelled positions from real
+levels through the detector and diffs every blocked cell against a committed
+baseline. See [`corpus/README.md`](corpus/README.md) for how labels are
+captured and why a segment count is not evidence.
 
 The exe bundles the built viewer, the bridge, and Node itself into one file
 (via [`@yao-pkg/pkg`](https://github.com/yao-pkg/pkg)); it serves the viewer and

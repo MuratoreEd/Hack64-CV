@@ -26,6 +26,12 @@ Versions follow [semver](https://semver.org/). The version lives in
 
 ### Added
 
+- **Ground-truth corpus** (`corpus/`): a HUD action saves what the user knows
+  about the spot Mario is standing on together with the exact surface pool that
+  produced it, and `npm run corpus` replays every label through the real
+  detector. Each pool also gets a baseline listing every blocked cell, so a
+  detector change shows up as added and removed cells instead of a segment
+  count nobody can check. Same file format as the planned bug-report export.
 - Collision profiles (`src/collision/profile.ts`): the ROM's collision
   behaviour is modelled explicitly as `{ wallThreshold, select }`, with
   vanilla (0.01 / first-hit floor) and Frame's-patch (0.05 / highest floor)

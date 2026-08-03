@@ -34,6 +34,13 @@ export class LiveClient {
     private handlers: LiveHandlers,
   ) {}
 
+  /** The raw pool exactly as the bridge delivered it (canonical big-endian),
+   * for ground-truth capture: the corpus stores bytes, not parsed surfaces, so
+   * a replay can re-classify them under any collision profile. */
+  get rawPool(): { buffer: ArrayBuffer; count: number; base: number } | null {
+    return this.lastPool;
+  }
+
   /** Re-classify the current pool under a new wall threshold. No-op when the
    * threshold is unchanged or no pool has arrived yet. */
   setWallThreshold(threshold: number): void {

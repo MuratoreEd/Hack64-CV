@@ -17,11 +17,15 @@ import {
 } from "./collision/profile";
 import { detectWallThreshold } from "./collision/patchDetect";
 import type { ProbeResult } from "./probe/invisibleWalls";
+import { sessionProbeOptions } from "./probe/config";
 import type { ProbeRequest } from "./probe/worker";
 import type { Surface } from "./collision/surface";
 import { buildLevelModel } from "./gfx/level";
 import { LiveClient } from "./net/liveClient";
 import { BRIDGE_DEFAULT_PORT } from "./net/protocol";
+import type { StateMessage } from "./net/protocol";
+import { SURFACE_STRUCT_SIZE } from "./collision/constants";
+import { buildCapture, captureFilename, downloadCapture } from "./corpus/capture";
 
 const app = document.querySelector<HTMLDivElement>("#app");
 if (!app) throw new Error("#app container not found");
@@ -29,8 +33,15 @@ if (!app) throw new Error("#app container not found");
 const viewer = new Viewer(app);
 viewer.setSurfaces(demoScene());
 
+// Ground-truth capture is a labelling tool, not a viewer feature: on in dev,
+// and available from the packaged exe with ?capture=1 for a labelling session
+// run against the real build.
+const captureEnabled =
+  import.meta.env.DEV || new URLSearchParams(location.search).has("capture");
+
 const hud = createHud(app, viewer, {
   onConnect: () => client.connect(),
+  onCaptureLabel: captureEnabled ? captureLabel : undefined,
 });
 hud.setCounts(viewer.counts);
 
@@ -116,6 +127,9 @@ function applyProfile(select: FloorSelect, observed: boolean): void {
 // Previous frame's Mario position, to tell whether he moved. When he didn't, the
 // game leaves gMarioState->wall stale, so the wall oracle can't be checked.
 let prevPos: { x: number; y: number; z: number } | null = null;
+// Latest state frame, so a ground-truth capture records the level/area/position
+// the user is looking at right now.
+let lastState: StateMessage | null = null;
 // The probe depends on the surface pool AND worldScale (Mario's 160-unit hitbox
 // is a world-space constant, = 160/scale in collision units). Scale is only
 // known once state frames arrive, so run the probe lazily whenever this key
@@ -166,22 +180,55 @@ function runProbe(): void {
   hud.setProbeBusy(true);
   const request: ProbeRequest = {
     surfaces: liveSurfaces,
-    options: {
-      marioHeight: 160 / worldScale,
-      ledgeGrace: 100 / worldScale,
-      wallOffset: 60 / worldScale,
-      wallRadius: 50 / worldScale,
-      boundary: partition.boundary,
+    options: sessionProbeOptions({
+      worldScale,
       select: floorSelect,
-    },
+      boundary: partition.boundary,
+    }),
   };
   probeWorker.postMessage(request);
+}
+
+/** Save what the user knows about the spot Mario is standing on, together with
+ * the surface pool that produced it — the R1 ground-truth corpus is built from
+ * these, and R6 bug reports use the identical file format. */
+async function captureLabel(
+  label: "wall" | "clear",
+  note: string,
+): Promise<string> {
+  const pool = client.rawPool;
+  if (!pool || !lastState) throw new Error("connect and enter a level first");
+  const bytes = new Uint8Array(pool.buffer, 0, pool.count * SURFACE_STRUCT_SIZE);
+  const capture = await buildCapture(
+    {
+      poolBytes: bytes,
+      poolCount: pool.count,
+      poolBase: pool.base,
+      level: lastState.level,
+      area: lastState.area,
+      worldScale,
+      profile: {
+        wallThreshold: profile().wallThreshold,
+        select: floorSelect,
+        known: profileKnown,
+      },
+      marioWorldPos: {
+        x: lastState.pos.x,
+        y: lastState.pos.y,
+        z: lastState.pos.z,
+      },
+    },
+    label,
+    note,
+  );
+  downloadCapture(capture);
+  return `saved ${captureFilename(capture)}`;
 }
 
 // Dev-only inspection hook so the live partition/surfaces/state (and the
 // viewer/hud, for driving the anomaly overlay by hand) can be poked at from the
 // console (or the preview tools) while validating the oracle and probe.
-const debug: Record<string, unknown> = { viewer, hud };
+const debug: Record<string, unknown> = { viewer, hud, captureLabel };
 if (import.meta.env.DEV) (window as unknown as { __ivw: unknown }).__ivw = debug;
 
 // Dev: Vite serves the page on 5173 and the bridge listens on its own port.
@@ -233,6 +280,8 @@ const client = new LiveClient(bridgeUrl, {
     debug.levelModel = model;
   },
   onState: (state) => {
+    lastState = state;
+    hud.setCaptureReady(captureEnabled && client.rawPool !== null);
     const detected = detectWorldScale(liveSurfaces, state);
     if (detected) worldScale = detected;
     // Direct observation of the selection rule, when the geometry under Mario

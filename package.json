@@ -11,7 +11,10 @@
     "build:exe": "npm run build && node scripts/buildExe.mjs",
     "preview": "vite preview",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "corpus": "vitest run --config vitest.corpus.config.ts",
+    "corpus:fixtures": "vite-node scripts/makeFixtures.ts",
+    "corpus:import": "node scripts/importCapture.mjs"
   },
   "dependencies": {
     "three": "^0.170.0"
