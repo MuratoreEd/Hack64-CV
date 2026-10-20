@@ -9,6 +9,8 @@
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "build:exe": "npm run build && node scripts/buildExe.mjs",
+    "exe": "powershell -NoProfile -ExecutionPolicy Bypass -File run-exe.ps1",
+    "shortcut": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/makeShortcut.ps1",
     "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest",

@@ -82,6 +82,16 @@ Click **"Connect to Project64"** in the viewer and the level appears.
 If you close and reopen Project64, run `start.cmd` again — it cleans up the old
 bridge and relaunches everything.
 
+### Testing the packaged exe
+
+Double-click **`run-exe.cmd`** — or the desktop shortcut that `npm run shortcut`
+creates. It rebuilds `dist-exe\InvisibleWallViewer.exe` first if any of the code
+it's built from changed since the last build, stops an older copy that's still
+running (and the dev bridge, which needs the same port), then starts the exe
+with the ground-truth capture panel enabled. Options, from a terminal:
+`.\run-exe.ps1 -Rebuild` forces a rebuild, `-NoOpen` skips opening the browser,
+`-Port 8082` serves somewhere else.
+
 ### Running it manually
 
 `start.cmd` is just a convenience wrapper. You can run the two pieces yourself:

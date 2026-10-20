@@ -41,6 +41,10 @@ Versions follow [semver](https://semver.org/). The version lives in
   on any level instead of only where the two floor-selection rules happen to
   disagree under Mario.
 - Version shown in the HUD and in both bridge banners.
+- `run-exe.cmd`, and a desktop shortcut to it (`npm run shortcut`): one click
+  rebuilds the exe if its code changed, makes room on the port (an older copy,
+  or the dev bridge), and starts it. The exe's new `--capture` flag opens the
+  viewer with the ground-truth capture panel.
 
 ### Fixed
 
