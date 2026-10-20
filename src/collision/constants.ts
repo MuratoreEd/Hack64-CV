@@ -64,3 +64,6 @@ export const SURFACE_Y_BUFFER = 78;
 export const WALL_MAX_RADIUS = 200;
 /** Surface type ignored by non-camera collision queries (skipped in find_*). */
 export const SURFACE_CAMERA_BOUNDARY = 0x0072;
+/** Floor type Mario falls through: find_floor re-queries the static list from
+ * 200 units below it (vanilla uses it for BBH's merry-go-round hole). */
+export const SURFACE_INTANGIBLE = 0x0012;

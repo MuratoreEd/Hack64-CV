@@ -13,18 +13,22 @@ import {
 import {
   VANILLA_PROFILE,
   PATCHED_PROFILE,
+  wallsForThreshold,
+  type CollisionProfile,
   type FloorSelect,
+  type WallModel,
 } from "./collision/profile";
-import { detectWallThreshold } from "./collision/patchDetect";
-import type { ProbeResult } from "./probe/invisibleWalls";
+import { detectWallThreshold, readPoolFromRdram } from "./collision/patchDetect";
+import { detectPatchSignatures } from "./collision/patchSignatures";
 import { sessionProbeOptions } from "./probe/config";
-import type { ProbeRequest } from "./probe/worker";
+import type { ProbeRequest, ProbeResponse } from "./probe/worker";
+import { parseSurfacePool, staticFingerprint } from "./collision/surface";
 import type { Surface } from "./collision/surface";
 import { buildLevelModel } from "./gfx/level";
 import { LiveClient } from "./net/liveClient";
 import { BRIDGE_DEFAULT_PORT } from "./net/protocol";
 import type { StateMessage } from "./net/protocol";
-import { SURFACE_STRUCT_SIZE } from "./collision/constants";
+import { SURFACE_FLAG_DYNAMIC, SURFACE_STRUCT_SIZE } from "./collision/constants";
 import { buildCapture, captureFilename, downloadCapture } from "./corpus/capture";
 
 const app = document.querySelector<HTMLDivElement>("#app");
@@ -45,28 +49,34 @@ const hud = createHud(app, viewer, {
 });
 hud.setCounts(viewer.counts);
 
-// Clicking an anomaly quad resolves it back to the responsible surfaces (only
-// main.ts holds the pool + world scale) and drives the inspector panel.
-viewer.onAnomalyPick = (seg) => {
+// Clicking an anomaly box resolves it back to the responsible surfaces (only
+// main.ts holds the pool + world scale) and drives the inspector panel. The
+// box is the clicked cells' own data; the segment is the run they belong to.
+viewer.onAnomalyPick = (seg, box) => {
   if (!seg) {
     hud.setInspector(null);
     return;
   }
+  const s = probedScale;
   const blocker = seg.blockerAddr
     ? surfaceByAddr.get(seg.blockerAddr >>> 0)
     : undefined;
-  const source = liveSurfaces[seg.sourceIndex];
-  const cx = (seg.x0 + seg.x1) / 2;
-  const cz = (seg.z0 + seg.z1) / 2;
+  const source = probedSurfaces.get(seg.sourceIndex);
   hud.setInspector({
     kind: seg.kind,
-    worldCenter: {
-      x: cx * worldScale,
-      y: seg.yBase * worldScale,
-      z: cz * worldScale,
-    },
-    regionLow: seg.yLow * worldScale,
-    regionHigh: seg.yHigh * worldScale,
+    cells: box
+      ? {
+          // Cell c spans [c, c+1) in collision units.
+          x: ((box.cellX0 + box.cellX1 + 1) / 2) * s,
+          z: ((box.cellZ0 + box.cellZ1 + 1) / 2) * s,
+          count: (box.cellX1 - box.cellX0 + 1) * (box.cellZ1 - box.cellZ0 + 1),
+          yLow: box.yLow * s,
+          yHigh: box.yHigh * s,
+        }
+      : null,
+    runLow: seg.yLow * s,
+    runHigh: seg.yHigh * s,
+    standY: seg.yBase * s,
     samples: seg.samples,
     blockerAddr: seg.blockerAddr,
     blockerKind: blocker?.kind ?? null,
@@ -79,114 +89,278 @@ viewer.onAnomalyPick = (seg) => {
 // at Mario's position each frame and validate it against the game (the oracle).
 let partition: SpatialPartition | null = null;
 let liveSurfaces: Surface[] = [];
+// Identity of the level geometry in liveSurfaces (see staticFingerprint): the
+// bridge re-streams the pool whenever ANY object surface moves, and nothing
+// that depends only on level geometry should redo work for that. staticKey
+// adds the wall threshold the pool was parsed under (it decides the kinds).
+let geometryKey = "";
+let staticKey = "";
 // address -> Surface for the current pool, so the oracle can look up the game's
 // wall for the coplanar-sibling check even when we didn't detect it ourselves.
 let surfaceByAddr = new Map<number, Surface>();
-// World→collision scale (some hacks store collision at 1/scale of Mario's world
-// coords). Detected from the game's reported floor; sticky until a new value is
-// confirmed.
-let worldScale = 1;
-// Which collision engine the running ROM is. ROM-level collision patches change
-// real behavior (see collision/profile.ts), so the core has to know which one
-// it's imitating. Two independent live signals feed this:
-//   - patchDetect.detectWallThreshold reads the game's own partition lists out
-//     of each RDRAM snapshot. Position-independent, so it settles the question
-//     on any level that has a disputed-band surface — this is the primary one,
-//     and it re-runs per level/area, which is what makes a ROM reload or a
-//     switch to a different ROM re-identify instead of inheriting a stale
-//     verdict.
-//   - oracle.detectFloorSelect watches for the two selection rules disagreeing
-//     over Mario's column. Rarely available (needs overlapping floors) but it
-//     observes the selection rule DIRECTLY rather than inferring it from the
-//     threshold, so when it does speak it wins.
-let floorSelect: FloorSelect = VANILLA_PROFILE.select;
-// Set once either signal has spoken; until then the HUD says nothing rather
-// than claiming "vanilla".
-let profileKnown = false;
-// True when the verdict came from detectFloorSelect, which measures selection
-// directly — the threshold-based inference must not overwrite it.
-let selectObserved = false;
-const profile = () => (floorSelect === "extreme" ? PATCHED_PROFILE : VANILLA_PROFILE);
 
-/** Apply a new engine verdict: re-classify the pool under the new threshold
- * (classification is a parse-time decision), which re-fires onSurfaces and so
- * rebuilds the partition and re-probes. No-op when nothing actually changes. */
-function applyProfile(select: FloorSelect, observed: boolean): void {
-  const changed = !profileKnown || select !== floorSelect;
-  profileKnown = true;
-  if (observed) selectObserved = true;
-  if (!changed) return;
-  floorSelect = select;
-  debug.floorSelect = select;
-  client.setWallThreshold(profile().wallThreshold);
-  if (liveSurfaces.length > 0) {
-    partition = new SpatialPartition(liveSurfaces, { select: floorSelect });
+// --- World scale ---------------------------------------------------------
+// World→collision scale (some hacks store collision at 1/scale of Mario's world
+// coords), detected from the game's reported floor. Detection can fail for a
+// while (a flat floor at y=0 fits every scale), so the value is sticky — but it
+// is only VERIFIED for the level (and level geometry) it was measured on. A new
+// level starts unverified: the probe waits for a measurement (up to
+// SCALE_WAIT_MS) instead of silently running with the previous level's value,
+// and the HUD says so when it has to fall back to it. The geometry is part of
+// the key because a new level's pool can arrive BEFORE the state frame that
+// names the level — the level id alone would still vouch for the old scale.
+let worldScale = 1;
+let levelKey = "";
+let levelSince = 0;
+let scaleVerifiedFor = "";
+const SCALE_WAIT_MS = 4000;
+const scaleKey = () => `${levelKey}|${geometryKey}`;
+const scaleVerified = () => levelKey !== "" && scaleVerifiedFor === scaleKey();
+
+// --- Collision engine (profile) --------------------------------------------
+// ROM-level collision patches change real behavior (see collision/profile.ts),
+// so the core has to know which engine it's imitating. Each component carries
+// its own evidence:
+//   - code signatures (patchSignatures.ts): the patcher's own edits read back
+//     out of each RDRAM snapshot — the wall routine and the wall threshold;
+//   - the partition walk (patchDetect.ts): the threshold, inferred from which
+//     list the game filed borderline surfaces in — the fallback when the code
+//     is somewhere the signatures don't know;
+//   - the oracle (detectFloorSelect): the floor-selection rule, observed only
+//     when two containing floors disagree under Mario, so it is debounced.
+// Floor selection has no code signature (Frame's patcher doesn't touch it), so
+// until observed it's ASSUMED from the threshold — see profile.ts for why.
+let sigWalls: WallModel | null = null;
+let sigThreshold: number | null = null;
+let walkThreshold: number | null = null;
+let observedSelect: FloorSelect | null = null;
+let selectCandidate: FloorSelect | null = null;
+let selectStreak = 0;
+const SELECT_STREAK = 3;
+let activeProfile: CollisionProfile = VANILLA_PROFILE;
+// Until the first RDRAM snapshot has been examined, "vanilla" is only the
+// default; the probe waits for it (bounded like the scale wait) rather than
+// running once under the wrong engine and again under the right one.
+let snapshotSeen = false;
+
+interface ProfileVerdict {
+  profile: CollisionProfile;
+  /** Whether any evidence at all backs it (vs the vanilla default). */
+  known: boolean;
+  thresholdSource: "code" | "partition" | null;
+  wallsSource: "code" | "threshold" | null;
+  selectSource: "observed" | "threshold" | null;
+}
+
+function profileVerdict(): ProfileVerdict {
+  const threshold = sigThreshold ?? walkThreshold;
+  const wallThreshold = threshold ?? VANILLA_PROFILE.wallThreshold;
+  const walls = sigWalls ?? wallsForThreshold(wallThreshold);
+  const select =
+    observedSelect ??
+    (wallThreshold === PATCHED_PROFILE.wallThreshold ? "extreme" : "first");
+  return {
+    profile: { wallThreshold, walls, select },
+    known: threshold !== null || sigWalls !== null || observedSelect !== null,
+    thresholdSource:
+      sigThreshold !== null ? "code" : walkThreshold !== null ? "partition" : null,
+    wallsSource: sigWalls !== null ? "code" : threshold !== null ? "threshold" : null,
+    selectSource:
+      observedSelect !== null ? "observed" : threshold !== null ? "threshold" : null,
+  };
+}
+
+/** Adopt whatever the evidence now says. A threshold change re-classifies the
+ * pool (a parse-time decision), which re-fires onSurfaces and so rebuilds the
+ * partition and re-probes; a select/walls-only change does that directly. */
+function applyProfile(): void {
+  const v = profileVerdict();
+  hud.setProfile(v);
+  debug.profile = v;
+  const p = v.profile;
+  const a = activeProfile;
+  if (p.wallThreshold === a.wallThreshold && p.walls === a.walls && p.select === a.select) {
+    return;
+  }
+  activeProfile = p;
+  const reparsed = p.wallThreshold !== a.wallThreshold && client.rawPool !== null;
+  client.setWallThreshold(p.wallThreshold);
+  if (!reparsed) {
+    rebuildPartition();
     runProbe();
   }
 }
+
+function rebuildPartition(): void {
+  if (liveSurfaces.length === 0) return;
+  partition = new SpatialPartition(liveSurfaces, {
+    select: activeProfile.select,
+    walls: activeProfile.walls,
+    edgeMargin: 1 / worldScale,
+  });
+  debug.partition = partition;
+}
+
 // Previous frame's Mario position, to tell whether he moved. When he didn't, the
 // game leaves gMarioState->wall stale, so the wall oracle can't be checked.
 let prevPos: { x: number; y: number; z: number } | null = null;
 // Latest state frame, so a ground-truth capture records the level/area/position
 // the user is looking at right now.
 let lastState: StateMessage | null = null;
-// The probe depends on the surface pool AND worldScale (Mario's 160-unit hitbox
-// is a world-space constant, = 160/scale in collision units). Scale is only
-// known once state frames arrive, so run the probe lazily whenever this key
-// changes — it re-runs automatically when scale detection flips 1 → 4. Edge
-// marching over all floors+ceilings takes a noticeable fraction of a second,
-// so it runs in a Web Worker; the worker processes requests in order, so the
-// latest posted request always wins.
+
+// --- Probe -------------------------------------------------------------------
+// The probe depends on the level geometry, the world scale (Mario's 160-unit
+// hitbox is 160/scale collision units) and the profile, and takes seconds, so
+// it runs in a Web Worker whenever that key changes. A newer request makes the
+// one in flight worthless, so it's cancelled outright (worker terminated) —
+// previously superseded runs were computed to completion and thrown away, and
+// every object loading or unloading (which changes the total surface count)
+// queued another full run behind them.
 let probedKey = "";
+// Level geometry of the overlay on screen (or of the run in flight), so a
+// level change can clear walls that belong to the old geometry at once.
+let probedGeometry = "";
 let probeWorker: Worker | null = null;
-// In-flight probe requests. The worker answers strictly in order, so a result
-// that arrives while newer requests are still queued is stale — drawing it
-// would flash walls that the next result immediately moves or removes (worst
-// at connect, where scale detection flips 1 → 4 and re-probes). Stale results
-// are skipped and the HUD shows a "probing…" banner until the last one lands.
-let probesPending = 0;
-// The textured view needs a full RDRAM snapshot (graph nodes + display lists
-// + textures). Requested once per level/area; large, so never streamed.
+let probeSeq = 0;
+let probeInFlight = false;
+let probeRetry: ReturnType<typeof setTimeout> | null = null;
+// What a result was computed from, for the inspector: pending while in
+// flight, shown once its result is on screen.
+interface ProbeContext {
+  surfaces: Map<number, Surface>;
+  scale: number;
+}
+let pendingProbe: ProbeContext | null = null;
+let probedSurfaces = new Map<number, Surface>();
+let probedScale = 1;
+
+function startWorker(): Worker {
+  const w = new Worker(new URL("./probe/worker.ts", import.meta.url), {
+    type: "module",
+  });
+  w.onmessage = (e: MessageEvent<ProbeResponse>) => {
+    if (e.data.id !== probeSeq) return; // superseded
+    probeInFlight = false;
+    hud.setProbeBusy(false);
+    if ("error" in e.data) {
+      // probedKey stays: the same inputs would fail the same way, so only a
+      // change of geometry/scale/profile retries.
+      hud.setProbeError(e.data.error);
+      return;
+    }
+    if (pendingProbe) {
+      probedSurfaces = pendingProbe.surfaces;
+      probedScale = pendingProbe.scale;
+    }
+    viewer.setAnomalies(e.data.result.segments);
+    hud.setInspector(null); // the old pick no longer exists
+    hud.setProbe(e.data.result);
+    debug.probe = e.data.result;
+  };
+  w.onerror = (e) => {
+    // The worker itself failed (e.g. its module didn't load): drop it so the
+    // next change starts a fresh one.
+    probeInFlight = false;
+    hud.setProbeBusy(false);
+    hud.setProbeError(e.message || "probe worker failed");
+    w.terminate();
+    if (probeWorker === w) probeWorker = null;
+  };
+  return w;
+}
+
+function cancelProbe(): void {
+  if (probeInFlight && probeWorker) {
+    probeWorker.terminate();
+    probeWorker = null;
+  }
+  probeInFlight = false;
+  probeSeq++; // anything still in the pipe is now stale
+}
+
+function runProbe(): void {
+  if (!partition || liveSurfaces.length === 0) return;
+  // No state frame yet (the bridge sends the pool first): the first one will
+  // call back in, with a level to judge the scale against.
+  if (levelKey === "") return;
+  // New level geometry: whatever is on screen or in flight describes the old
+  // level. Clear it now, even if the new probe has to wait.
+  if (staticKey !== probedGeometry) {
+    cancelProbe();
+    probedGeometry = staticKey;
+    probedKey = "";
+    viewer.setAnomalies([]);
+    hud.setInspector(null);
+    hud.setProbe(null);
+  }
+  // Hold off on a level whose scale isn't confirmed yet (or before the engine
+  // has been identified), rather than probing under a stale assumption and
+  // then probing again.
+  const waited = Date.now() - levelSince;
+  const waitingFor = !snapshotSeen
+    ? "Identifying the collision engine…"
+    : !scaleVerified()
+      ? "Waiting for the world scale…"
+      : null;
+  if (waitingFor && waited < SCALE_WAIT_MS) {
+    hud.setProbeBusy(true, waitingFor);
+    if (!probeRetry) {
+      probeRetry = setTimeout(() => {
+        probeRetry = null;
+        runProbe();
+      }, SCALE_WAIT_MS - waited + 50);
+    }
+    return;
+  }
+  const p = activeProfile;
+  const key =
+    `${staticKey}:${partition.boundary}:${worldScale}:` +
+    `${p.wallThreshold}:${p.walls}:${p.select}`;
+  if (key === probedKey) {
+    if (!probeInFlight) hud.setProbeBusy(false);
+    return;
+  }
+  probedKey = key;
+  cancelProbe();
+  probeWorker ??= startWorker();
+  // The probe only ever looks at level geometry; don't clone the objects.
+  const statics = liveSurfaces.filter((s) => (s.flags & SURFACE_FLAG_DYNAMIC) === 0);
+  pendingProbe = {
+    surfaces: new Map(statics.map((s) => [s.index, s])),
+    scale: worldScale,
+  };
+  const request: ProbeRequest = {
+    id: ++probeSeq,
+    surfaces: statics,
+    options: sessionProbeOptions({
+      worldScale,
+      select: p.select,
+      walls: p.walls,
+      boundary: partition.boundary,
+    }),
+  };
+  probeInFlight = true;
+  hud.setProbeBusy(true);
+  probeWorker.postMessage(request);
+}
+
+// --- Textured level ----------------------------------------------------------
+// The textured view needs a full RDRAM snapshot (graph nodes + display lists +
+// textures). Requested once per level/area — and again (a few times) if the
+// level's graph wasn't in RAM yet, which happens right at a transition.
 let gfxKey = "";
+let gfxTries = 0;
+const GFX_MAX_TRIES = 5;
+let gfxRetry: ReturnType<typeof setTimeout> | null = null;
 // Camera framing: reframe on a real level/area change only. The new level's
 // surfaces can arrive just before OR just after the state frame that carries
 // the new level id, so the change opens a short window during which incoming
 // surface pools also reframe (frame() is idempotent for identical bounds).
 let reframeUntil = 0;
 
-function runProbe(): void {
-  if (!partition) return;
-  const key = `${liveSurfaces.length}:${partition.boundary}:${worldScale}:${floorSelect}`;
-  if (key === probedKey) return;
-  probedKey = key;
-  if (!probeWorker) {
-    probeWorker = new Worker(new URL("./probe/worker.ts", import.meta.url), {
-      type: "module",
-    });
-    probeWorker.onmessage = (e: MessageEvent<ProbeResult>) => {
-      probesPending--;
-      if (probesPending > 0) return; // stale: a newer request is queued
-      hud.setProbeBusy(false);
-      viewer.setAnomalies(e.data.segments);
-      hud.setProbe(e.data);
-      debug.probe = e.data;
-    };
-    probeWorker.onerror = () => {
-      probesPending = 0;
-      hud.setProbeBusy(false);
-    };
-  }
-  probesPending++;
-  hud.setProbeBusy(true);
-  const request: ProbeRequest = {
-    surfaces: liveSurfaces,
-    options: sessionProbeOptions({
-      worldScale,
-      select: floorSelect,
-      boundary: partition.boundary,
-    }),
-  };
-  probeWorker.postMessage(request);
+function requestSnapshot(): void {
+  gfxTries++;
+  client.send({ type: "rdram" });
 }
 
 /** Save what the user knows about the spot Mario is standing on, together with
@@ -199,6 +373,7 @@ async function captureLabel(
   const pool = client.rawPool;
   if (!pool || !lastState) throw new Error("connect and enter a level first");
   const bytes = new Uint8Array(pool.buffer, 0, pool.count * SURFACE_STRUCT_SIZE);
+  const v = profileVerdict();
   const capture = await buildCapture(
     {
       poolBytes: bytes,
@@ -207,10 +382,12 @@ async function captureLabel(
       level: lastState.level,
       area: lastState.area,
       worldScale,
+      worldScaleVerified: scaleVerified(),
       profile: {
-        wallThreshold: profile().wallThreshold,
-        select: floorSelect,
-        known: profileKnown,
+        wallThreshold: v.profile.wallThreshold,
+        select: v.profile.select,
+        walls: v.profile.walls,
+        known: v.known,
       },
       marioWorldPos: {
         x: lastState.pos.x,
@@ -241,38 +418,66 @@ const client = new LiveClient(bridgeUrl, {
   onStatus: (text, connected) => hud.setStatus(text, connected),
   onSurfaces: (surfaces) => {
     liveSurfaces = surfaces;
+    const geometry = staticFingerprint(surfaces);
+    if (geometry !== geometryKey) {
+      geometryKey = geometry;
+      levelSince = Date.now(); // the scale wait restarts with new geometry
+    }
+    staticKey = `${geometryKey}@${activeProfile.wallThreshold}`;
     surfaceByAddr = new Map(surfaces.map((s) => [s.address >>> 0, s]));
-    viewer.setSurfaces(surfaces);
+    viewer.setSurfaces(surfaces, staticKey);
     if (Date.now() < reframeUntil) viewer.reframe();
     hud.setCounts(viewer.counts);
-    partition = new SpatialPartition(surfaces, { select: floorSelect });
+    rebuildPartition();
     debug.surfaces = surfaces;
-    debug.partition = partition;
-    runProbe();
+    runProbe(); // no-op unless the level geometry (or scale/profile) changed
   },
   onRdram: (bytes) => {
     // Dev hook: lets DL-level issues be probed in-page (don't retain the
     // 8 MB snapshot in prod, where __ivw isn't exposed anyway).
     if (import.meta.env.DEV) debug.rdram = bytes;
-    // Re-identify the collision engine from the game's own partition on every
-    // snapshot (once per level/area, and after a ROM reload or swap). A level
-    // with no disputed-band surfaces yields null — keep the current belief
-    // rather than falling back to vanilla. A directly-observed selection rule
-    // is never overwritten by this inference.
-    if (liveSurfaces.length === 0) {
-      // Snapshot beat the first surface pool: nothing to correlate it against.
-      // Clearing the key makes the next state frame re-request it.
-      gfxKey = "";
+
+    // Identify the collision engine from THIS snapshot — its code, and the
+    // pool it contains (never the last streamed pool, which may still be the
+    // previous level's).
+    const sig = detectPatchSignatures(bytes);
+    if (
+      (sigWalls !== null && sig.walls !== null && sig.walls !== sigWalls) ||
+      (sigThreshold !== null && sig.wallThreshold !== null &&
+        sig.wallThreshold !== sigThreshold)
+    ) {
+      // Different code than before: a different ROM. What the oracle observed
+      // about the old one no longer applies.
+      observedSelect = null;
+      selectStreak = 0;
     }
-    const patch = detectWallThreshold(bytes, liveSurfaces);
-    debug.patchDetection = patch;
-    if (patch.wallThreshold !== null && !selectObserved) {
-      applyProfile(
-        patch.wallThreshold === PATCHED_PROFILE.wallThreshold ? "extreme" : "first",
-        false,
+    sigWalls = sig.walls;
+    sigThreshold = sig.wallThreshold;
+    const snap = readPoolFromRdram(bytes);
+    if (snap) {
+      const surfaces = parseSurfacePool(
+        snap.bytes.slice().buffer as ArrayBuffer,
+        snap.count,
+        { baseAddress: snap.base },
       );
+      const walk = detectWallThreshold(bytes, surfaces);
+      debug.patchDetection = walk;
+      // A level with no borderline surfaces says nothing: keep the belief.
+      if (walk.wallThreshold !== null) walkThreshold = walk.wallThreshold;
     }
+    debug.patchSignatures = sig;
+    snapshotSeen = true;
+    applyProfile();
+    runProbe(); // a probe held for the engine verdict can go now
+
     const model = buildLevelModel(bytes);
+    if (!model && gfxTries < GFX_MAX_TRIES && !gfxRetry) {
+      const key = gfxKey;
+      gfxRetry = setTimeout(() => {
+        gfxRetry = null;
+        if (key === gfxKey) requestSnapshot();
+      }, 1000);
+    }
     viewer.setLevelModel(model);
     hud.setTexturedAvailable(model !== null);
     hud.setSkyboxAvailable(model?.skybox != null);
@@ -282,32 +487,52 @@ const client = new LiveClient(bridgeUrl, {
   onState: (state) => {
     lastState = state;
     hud.setCaptureReady(captureEnabled && client.rawPool !== null);
+
+    const nextLevel = `${state.level}:${state.area}`;
+    if (nextLevel !== levelKey) {
+      levelKey = nextLevel;
+      levelSince = Date.now();
+    }
+
     const detected = detectWorldScale(liveSurfaces, state);
-    if (detected) worldScale = detected;
+    if (detected !== null) {
+      const changed = detected !== worldScale;
+      worldScale = detected;
+      scaleVerifiedFor = scaleKey();
+      if (changed) rebuildPartition(); // Frame's edge margin is 1/scale
+    }
+    viewer.setModelScale(worldScale);
+
     // Direct observation of the selection rule, when the geometry under Mario
-    // happens to expose it. Outranks the threshold-based inference.
+    // happens to expose it. Debounced: one frame's pos/pointer skew must not
+    // flip the engine and re-probe the level.
     if (partition) {
       const verdict = detectFloorSelect(partition, state, worldScale);
-      if (verdict) applyProfile(verdict, true);
+      if (verdict !== null) {
+        if (verdict === selectCandidate) selectStreak++;
+        else {
+          selectCandidate = verdict;
+          selectStreak = 1;
+        }
+        if (selectStreak >= SELECT_STREAK && observedSelect !== verdict) {
+          observedSelect = verdict;
+          applyProfile();
+        }
+      }
     }
-    hud.setProfile(floorSelect === "extreme" ? "patched" : "vanilla", profileKnown);
-    viewer.setModelScale(worldScale);
-    const nextGfxKey = `${state.level}:${state.area}`;
-    if (nextGfxKey !== gfxKey) {
-      gfxKey = nextGfxKey;
-      client.send({ type: "rdram" });
-      // A new level (including one reached by reloading or swapping the ROM)
-      // gets to re-earn the direct selection observation, so the fresh
-      // snapshot's verdict isn't blocked by one from the previous ROM. The
-      // current belief stays as the fallback until something contradicts it.
-      selectObserved = false;
+
+    if (nextLevel !== gfxKey) {
+      gfxKey = nextLevel;
+      gfxTries = 0;
+      requestSnapshot();
       // A real level/area change: snap the camera to the new level (and let
       // the surface pools arriving over the next moments do the same, in
       // case they land after this state frame).
       viewer.reframe();
       reframeUntil = Date.now() + 2000;
     }
-    runProbe(); // no-op unless the pool or the detected scale changed
+    runProbe(); // no-op unless the geometry, scale or profile changed
+
     const moved =
       prevPos === null ||
       prevPos.x !== state.pos.x ||
@@ -320,7 +545,7 @@ const client = new LiveClient(bridgeUrl, {
       y: state.pos.y / worldScale,
       z: state.pos.z / worldScale,
     });
-    hud.setContext(state.level, state.area, state.pos, worldScale);
+    hud.setContext(state.level, state.area, state.pos, worldScale, scaleVerified());
     const oracle = partition
       ? evaluateOracle(partition, state, worldScale, { moved, surfaceByAddr })
       : null;

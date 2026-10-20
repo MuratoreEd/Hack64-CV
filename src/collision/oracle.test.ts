@@ -93,6 +93,37 @@ describe("evaluateOracle walls", () => {
   });
 });
 
+describe("evaluateOracle wall queries mirror the game's (offset, radius) pairs", () => {
+  // A wall on x = 0 facing +x that exists only from y 190 to 260: at Mario's
+  // y = 50 only the air step's +150 probe (y 200) reaches it.
+  const highWall = makeSurface([0, 190, 100], [0, 190, -100], [0, 260, -100], {
+    address: 0xd00,
+  })!;
+  const at = (x: number, scale = 1): StateMessage => ({
+    ...state(0),
+    pos: { x: x * scale, y: 50 * scale, z: 0 },
+  });
+
+  it("includes the air step's +150 probe", () => {
+    const r = evaluateOracle(new SpatialPartition([highWall]), at(30), 1);
+    expect(r.wall.ourAddrs).toContain(0xd00);
+  });
+
+  it("uses the real radius (50), not 150", () => {
+    // 100 away: inside the bogus (60, 150) pair the table used to have.
+    expect(evaluateOracle(new SpatialPartition([wallA]), at(-100), 1).wall.ourAddrs)
+      .toEqual([]);
+  });
+
+  it("scales offsets and radii with the world scale", () => {
+    // At 4×, 100 world units is 25 collision units — outside the 12.5 radius,
+    // inside the unscaled 50 an earlier version used.
+    const p = new SpatialPartition([wallA]);
+    expect(evaluateOracle(p, at(-25, 4), 4).wall.ourAddrs).toEqual([]);
+    expect(evaluateOracle(p, at(-10, 4), 4).wall.ourAddrs).toContain(0xa00);
+  });
+});
+
 describe("evaluateOracle floor/ceil coplanar siblings", () => {
   // A floor quad at y=0 split along its diagonal: two coplanar triangles.
   const floorA = makeSurface([-200, 0, -200], [-200, 0, 200], [200, 0, 200], {

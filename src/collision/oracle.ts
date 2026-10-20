@@ -67,16 +67,20 @@ export interface OracleResult {
 
 const CLEAN_SCALES = [1, 2, 4, 8, 16];
 
-// The (offsetY, radius) pairs the game itself uses to set gMarioState->wall:
-// perform_ground_quarter_step runs (30, 24) then (60, 50); perform_air_quarter_step
-// runs (30, 50) then (60, 150). We union the walls found across all four so the
-// membership test reflects exactly what the game's own routines would detect near
-// Mario, regardless of which act (ground vs air) last wrote the pointer.
+// The (offsetY, radius) pairs, in WORLD units, the game itself uses to set
+// gMarioState->wall: perform_ground_quarter_step runs (30, 24) then (60, 50);
+// perform_air_quarter_step runs (150, 50) then (30, 50) (mario_step.c). We
+// union the walls found across all of them so the membership test reflects
+// what the game's own routines detect near Mario, whichever act last wrote the
+// pointer. Divided by the world scale like every mario_step.c constant — Frame's
+// extended-boundary wall routine visibly scales offset and radius by 1/4.
+// (An earlier table had the air pair as (60, 150): 3× the real radius, which
+// only made the check more lenient.)
 const GAME_WALL_QUERIES: readonly [number, number][] = [
   [30, 24],
   [60, 50],
+  [150, 50],
   [30, 50],
-  [60, 150],
 ];
 
 /** Two triangles belong to the same physical surface when they share a plane:
@@ -231,8 +235,9 @@ export function evaluateOracle(
 
   // The game finds the ceiling from `floorHeight + 80`, not Mario's position
   // (vec3f_find_ceil in update_mario_geometry_inputs), so a low ceiling near his
-  // feet is skipped. The +80 is an unscaled collision-space constant.
-  const ceilY = (fh.surface ? fh.height : cy) + 80;
+  // feet is skipped. The +80 is an unscaled collision-space constant. With no
+  // floor, floorHeight is FLOOR_LOWER_LIMIT (fh.height already holds it).
+  const ceilY = fh.height + 80;
   const ch = partition.findCeil(cx, ceilY, cz);
   const ceil = fieldOracle(
     ch.surface,
@@ -252,7 +257,7 @@ export function evaluateOracle(
   const wy = state.pos.y / scale;
   const wz = state.pos.z / scale;
   for (const [offsetY, radius] of GAME_WALL_QUERIES) {
-    const wc = partition.findWallCollisions(wx, wy, wz, offsetY, radius);
+    const wc = partition.findWallCollisions(wx, wy, wz, offsetY / scale, radius / scale);
     for (const w of wc.walls) {
       const a = w.address >>> 0;
       if (!ourWalls.has(a)) {

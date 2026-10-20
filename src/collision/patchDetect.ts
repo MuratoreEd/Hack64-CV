@@ -20,11 +20,41 @@
 //   struct SurfaceNode { struct SurfaceNode *next; struct Surface *surface; };
 //     next @ +0, surface @ +4  (getting this backwards yields plausible-looking
 //     garbage — gMarioStates+0x68 is a Surface* whose neighbour is also one)
+//
+// The snapshot must be judged against the pool IT contains, not whatever pool
+// the viewer last received: at a level change the new snapshot can land while
+// the old level's pool is still current, and its addresses then point at
+// different surfaces in the new level — a stale pool reliably reads "vanilla"
+// (old floors show up as decisive neighbours). readPoolFromRdram takes the pool
+// straight out of the snapshot for exactly that reason.
 
 import type { Surface } from "./surface";
-import { SURFACE_FLAG_DYNAMIC } from "./constants";
+import { SURFACE_FLAG_DYNAMIC, SURFACE_STRUCT_SIZE } from "./constants";
 
 const KSEG0 = (a: number): boolean => a >= 0x80000000 && a < 0x80800000;
+
+/** US gSurfacesAllocated (s32) and sSurfacePool (Surface*) — the same anchors
+ * the bridge streams the pool from (bridge/src/rdram.ts). */
+const US_SURFACES_ALLOCATED = 0x80361170;
+const US_SURFACE_POOL = 0x8038ee9c;
+
+/** The surface pool as it stands inside an RDRAM snapshot, or null when the
+ * anchors don't describe a plausible pool (title screen, mid-load). */
+export function readPoolFromRdram(
+  rdram: Uint8Array,
+): { bytes: Uint8Array; count: number; base: number } | null {
+  const view = new DataView(rdram.buffer, rdram.byteOffset, rdram.byteLength);
+  const off = (a: number): number => (a & 0x1fffffff) >>> 0;
+  if (off(US_SURFACE_POOL) + 4 > rdram.length) return null;
+  const count = view.getInt32(off(US_SURFACES_ALLOCATED));
+  const base = view.getUint32(off(US_SURFACE_POOL)) >>> 0;
+  if (count < 1 || count > 100000) return null;
+  if (!KSEG0(base)) return null;
+  const start = off(base);
+  const end = start + count * SURFACE_STRUCT_SIZE;
+  if (end > rdram.length) return null;
+  return { bytes: rdram.subarray(start, end), count, base };
+}
 
 /** Longest chain we'll follow before giving up on a candidate node. Wall lists
  * in a dense cell get long; we only need to reach one decisive neighbour. */
@@ -71,16 +101,22 @@ export function detectWallThreshold(
     return off + 4 <= rdram.length ? view.getUint32(off) >>> 0 : 0;
   };
 
-  // normal.y by surface address, and the pool's low bound: SM64 carves surface
-  // NODES out of the same pool as the surfaces, above them, so this cheaply
-  // rejects stray Surface* fields elsewhere in RAM (e.g. gMarioStates).
+  // normal.y by surface address, and the surface array's extent. Nodes are
+  // never INSIDE the surface array, but they can sit on either side of it:
+  // vanilla allocates the node pool first (alloc_surface_pools, MEMORY_POOL_LEFT
+  // grows upward), so its nodes are BELOW the surfaces, while this hack keeps
+  // them above. Stray Surface* pairs elsewhere in RAM (gMarioStates+0x60..0x68)
+  // are rejected by the chain walk: their "next" isn't a pool node.
   const normalY = new Map<number, number>();
   let poolLow = Infinity;
+  let poolHigh = -Infinity;
   for (const s of surfaces) {
     const a = s.address >>> 0;
     normalY.set(a, s.normal.y);
     if (a < poolLow) poolLow = a;
+    if (a > poolHigh) poolHigh = a;
   }
+  poolHigh += SURFACE_STRUCT_SIZE;
 
   // Static surfaces only: dynamic (object) collision is rebuilt every frame, so
   // its nodes may not match the snapshot.
@@ -96,7 +132,7 @@ export function detectWallThreshold(
   const candidates: number[] = [];
   for (let off = 0; off + 8 <= rdram.length; off += 4) {
     const addr = 0x80000000 + off;
-    if (addr <= poolLow) continue;
+    if (addr >= poolLow && addr < poolHigh) continue; // inside a Surface struct
     if (!disputed.has(view.getUint32(off + 4) >>> 0)) continue;
     const next = view.getUint32(off) >>> 0;
     if (next !== 0 && !KSEG0(next)) continue;
@@ -111,6 +147,7 @@ export function detectWallThreshold(
     const self = u32(node + 4) >>> 0;
     let decisive = false;
     let valid = true;
+    let walked = 0;
     let n = u32(node) >>> 0;
     for (let step = 0; step < MAX_CHAIN && n !== 0; step++) {
       if (!KSEG0(n)) {
@@ -122,14 +159,18 @@ export function detectWallThreshold(
         valid = false; // not a real node chain
         break;
       }
+      walked++;
       if (Math.abs(ny) > DECISIVE) {
         decisive = true;
         break;
       }
       n = u32(n) >>> 0;
     }
-    // A chain of length 0, or one that ran into non-pool data, proves nothing.
-    if (!valid) continue;
+    // A chain that ran into non-pool data proves nothing — and neither does a
+    // node at the END of its list (nothing after it to look at): on a vanilla
+    // ROM a disputed floor that sorts last in its cell would otherwise vote
+    // "wall list".
+    if (!valid || walked === 0) continue;
     examined.add(self);
     if (decisive) floorOrCeilListVotes++;
     else wallListVotes++;

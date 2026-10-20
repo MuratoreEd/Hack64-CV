@@ -21,6 +21,7 @@ import { sessionProbeOptions } from "../src/probe/config";
 import { decodePool, CORPUS_SCHEMA_VERSION } from "../src/corpus/schema";
 import type { StoredLabel, StoredPool } from "../src/corpus/schema";
 import { judgeLabel } from "../src/corpus/judge";
+import { wallsForThreshold } from "../src/collision/profile";
 
 type JsonModule<T> = { default: T };
 
@@ -91,6 +92,15 @@ describe("corpus integrity", () => {
     expect(unknown).toEqual([]);
   });
 
+  it("every label was taken with a measured (not carried-over) world scale", () => {
+    // A scale inherited from the previous level can be off by 4×, which moves
+    // every blocked cell. Older captures don't record it (undefined): allowed.
+    const inherited = Object.entries(labelModules)
+      .filter(([, m]) => m.default.worldScaleVerified === false)
+      .map(([p]) => basename(p));
+    expect(inherited).toEqual([]);
+  });
+
   it("has real (non-fixture) labels", () => {
     // Fails until the R1 labelling session happens. That is the point: the
     // corpus is the gate, and an empty corpus should not look green.
@@ -138,6 +148,7 @@ for (const entry of [...pools.values()].sort((a, b) => a.file.localeCompare(b.fi
         sessionProbeOptions({
           worldScale: pool.worldScale,
           select: pool.profile.select,
+          walls: pool.profile.walls ?? wallsForThreshold(pool.profile.wallThreshold),
           boundary: partition.boundary,
         }),
       );

@@ -110,6 +110,13 @@ for (const file of candidates()) {
         `the corpus runner will reject it. Re-capture once the HUD shows the patch verdict.`,
     );
   }
+  if (cap.worldScaleVerified === false) {
+    console.warn(
+      `! ${path.basename(file)}: captured while the world scale was carried over from ` +
+        `another level — the corpus runner will reject it. Re-capture once the HUD ` +
+        `stops saying "not yet measured here".`,
+    );
+  }
 
   const hash = createHash("sha256").update(bytes).digest("hex").slice(0, 8);
   const poolFile = `L${cap.level}-A${cap.area}-${hash}.json`;

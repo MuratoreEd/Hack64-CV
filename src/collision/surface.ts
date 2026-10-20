@@ -5,6 +5,7 @@ import {
   SURFACE_STRUCT_SIZE,
   SURFACE_OFFSETS,
   SURFACE_FLAG_X_PROJECTION,
+  SURFACE_FLAG_DYNAMIC,
   FLOOR_NORMAL_Y_THRESHOLD,
 } from "./constants";
 
@@ -135,6 +136,33 @@ export function parseSurfacePool(
     surfaces[i] = parseSurface(view, i * SURFACE_STRUCT_SIZE, i, opts);
   }
   return surfaces;
+}
+
+/**
+ * A cheap identity for the STATIC part of a pool: level geometry is loaded
+ * once per area, while object (dynamic) surfaces are rewritten every frame the
+ * objects move and come and go as they load/unload. Anything that only depends
+ * on level geometry — the probe, the static collision mesh — keys on this, so
+ * a platform moving or a goomba spawning doesn't redo it. Geometry only: the
+ * parsed kinds depend on the wall threshold, which callers key on separately.
+ */
+export function staticFingerprint(surfaces: readonly Surface[]): string {
+  let h = 0x811c9dc5; // FNV-1a
+  let n = 0;
+  const mix = (v: number): void => {
+    h = Math.imul(h ^ (v & 0xffff), 0x01000193);
+  };
+  for (const s of surfaces) {
+    if ((s.flags & SURFACE_FLAG_DYNAMIC) !== 0) continue;
+    n++;
+    for (const v of s.vertices) {
+      mix(v[0]);
+      mix(v[1]);
+      mix(v[2]);
+    }
+    mix(s.type);
+  }
+  return `${n}:${(h >>> 0).toString(16)}`;
 }
 
 export interface LevelBounds {

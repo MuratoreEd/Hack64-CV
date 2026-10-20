@@ -14,6 +14,7 @@ import {
   readSurfacePool,
   readRdramSnapshot,
   type Rdram,
+  type SurfacePool,
 } from "./rdram.js";
 import type {
   ServerMessage,
@@ -49,8 +50,7 @@ function attach(): { proc: ProcessMemory; rd: Rdram } {
   return { proc, rd };
 }
 
-function buildSurfacesMessage(rd: Rdram): SurfacesMessage {
-  const pool = readSurfacePool(rd);
+function surfacesMessage(pool: SurfacePool): SurfacesMessage {
   return {
     type: "surfaces",
     count: pool.count,
@@ -76,6 +76,10 @@ function runDump(rd: Rdram): void {
       `ceilHeight ${state.ceilHeight.toFixed(1)} (surf 0x${state.ceilAddr.toString(16)}), ` +
       `wall 0x${state.wallAddr.toString(16)}`,
   );
+  if (!pool) {
+    console.log("surfaces: no valid pool (mid level load, or not in a level)");
+    return;
+  }
   console.log(
     `surfaces: ${pool.count} @ pool base 0x${pool.poolBase.toString(16)} (${pool.bytes.length} bytes)`,
   );
@@ -99,28 +103,43 @@ function serve(proc: ProcessMemory, rd: Rdram, port: number): void {
     if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg));
   };
 
+  // The last good pool: sent to each viewer on connect and on "refresh", and
+  // what change detection compares against.
+  let lastPool: SurfacePool | null = null;
+
   wss.on("connection", (ws) => {
     console.log("viewer connected");
     try {
-      send(ws, buildSurfacesMessage(rd));
+      const pool = readSurfacePool(rd) ?? lastPool;
+      if (pool) send(ws, surfacesMessage(pool));
       send(ws, buildStateMessage(readState(rd)));
     } catch (err) {
       console.error("initial read failed:", (err as Error).message);
     }
     ws.on("message", (data) => {
-      const msg = JSON.parse(data.toString()) as ClientMessage;
-      if (msg.type === "refresh") send(ws, buildSurfacesMessage(rd));
-      if (msg.type === "rdram") {
-        try {
+      // A malformed message must not take the bridge down: an exception out
+      // of this listener is an uncaught exception for the whole process.
+      let msg: ClientMessage;
+      try {
+        msg = JSON.parse(data.toString()) as ClientMessage;
+      } catch {
+        return;
+      }
+      try {
+        if (msg.type === "refresh") {
+          const pool = readSurfacePool(rd) ?? lastPool;
+          if (pool) send(ws, surfacesMessage(pool));
+        }
+        if (msg.type === "rdram") {
           const snap = readRdramSnapshot(rd);
           send(ws, {
             type: "rdram",
             size: snap.length,
             base64: snap.toString("base64"),
           });
-        } catch (err) {
-          console.error("rdram snapshot failed:", (err as Error).message);
         }
+      } catch (err) {
+        console.error(`${msg.type} request failed:`, (err as Error).message);
       }
     });
     ws.on("close", () => console.log("viewer disconnected"));
@@ -130,25 +149,25 @@ function serve(proc: ProcessMemory, rd: Rdram, port: number): void {
   // (not just level/area/count — dynamic surfaces are rewritten in place every
   // frame, so content can change while the count stays identical, and the
   // oracle needs a pool snapshot coherent with the state it validates against).
-  let lastPool: Buffer | null = null;
   setInterval(() => {
     let state: ReturnType<typeof readState>;
-    let surfacesMsg: SurfacesMessage;
+    let pool: SurfacePool | null;
     try {
       state = readState(rd);
-      surfacesMsg = buildSurfacesMessage(rd);
+      pool = readSurfacePool(rd);
     } catch (err) {
       console.error("read failed (emulator closed?):", (err as Error).message);
       return;
     }
-    const poolBytes = Buffer.from(surfacesMsg.base64, "base64");
-    const changed = lastPool === null || !lastPool.equals(poolBytes);
-    lastPool = poolBytes;
-
-    const stateMsg = buildStateMessage(state);
+    // No valid pool (mid-load): keep the viewers on the last good one.
+    const changed = pool !== null && (lastPool === null || !lastPool.bytes.equals(pool.bytes));
+    if (changed) lastPool = pool;
+    const surfacesMsg = changed && pool ? JSON.stringify(surfacesMessage(pool)) : null;
+    const stateMsg = JSON.stringify(buildStateMessage(state));
     for (const ws of wss.clients) {
-      if (changed) send(ws, surfacesMsg);
-      send(ws, stateMsg);
+      if (ws.readyState !== WebSocket.OPEN) continue;
+      if (surfacesMsg) ws.send(surfacesMsg);
+      ws.send(stateMsg);
     }
   }, STATE_INTERVAL_MS);
 }

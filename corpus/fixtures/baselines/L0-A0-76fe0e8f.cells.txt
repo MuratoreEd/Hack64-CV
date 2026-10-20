@@ -398,4 +398,4 @@
 0,197,exposed-ceiling,0x8038ef2c,0.00,260.00
 0,198,exposed-ceiling,0x8038ef2c,0.00,260.00
 0,199,exposed-ceiling,0x8038ef2c,0.00,260.00
-0,200,exposed-ceiling,0x8038ef2c,0.00,260.00
+0,200,exposed-ceiling,0x8038eefc,0.00,260.00

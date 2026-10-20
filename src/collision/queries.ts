@@ -219,9 +219,10 @@ export interface WallCollisionData {
  * wall within `radius`, accumulating over the list (the wall-overlap
  * over-push quirk is preserved — px/pz are read once, not re-read after a push).
  * Wall in-plane tests are f32 in-game, so plain float math is faithful here.
+ * Returns the number of pushes applied (= collisions, in vanilla).
  */
 export function findWallCollisionsFromList(
-  list: Surface[],
+  list: readonly Surface[],
   data: WallCollisionData,
 ): number {
   let numCols = 0;
@@ -290,4 +291,164 @@ export function findWallCollisionsFromList(
   }
 
   return numCols;
+}
+
+/** Frame's patch: an edge push only counts as touching the wall (is recorded)
+ * when it points mostly along the wall's normal. */
+const FRAME_CORNER_THRESHOLD = -0.9;
+/** Frame's patch widens the edge margin by this after every edge push. */
+const FRAME_MARGIN_GROWTH = 0.01;
+
+/**
+ * Port of the find_wall_collisions_from_list that FramePerfection's
+ * SM64CollisionPatcher injects (its _misc/surface_collision.c; the shipped
+ * machine code was checked against it: margin from the unclamped radius, the
+ * `offset < 0` rejection, three sqrtf edge tests, x/z written back at the end).
+ *
+ * Differences from vanilla, all deliberate in the patch:
+ *   - ONE-SIDED: a point behind the plane (offset < 0) never collides.
+ *   - The face test is an orthogonal-projection barycentric test in 3D, not the
+ *     vanilla axis projection.
+ *   - A point that misses the face is pushed radially off each vertical edge it
+ *     is within `radius - edgeMargin` of, at its own height — edges behave like
+ *     capsules, which rounds wall ends and corners. An edge push is always
+ *     applied, but the wall is only RECORDED if the push points mostly along
+ *     its normal.
+ *   - Pushes ACCUMULATE: every wall is tested from the position the previous
+ *     push left, so two walls no longer over-push.
+ *
+ * `edgeMargin` is the patch's `1.0f` in collision units. On extended-boundary
+ * (4×) ROMs the patch computes `radius - 1` in world units and then scales
+ * everything by 1/4, so pass 1/worldScale there.
+ *
+ * Returns the number of pushes applied, which can exceed the recorded walls
+ * (edge pushes that fail the corner test move the point without recording).
+ */
+export function findWallCollisionsFromListFrame(
+  list: readonly Surface[],
+  data: WallCollisionData,
+  edgeMargin = 1,
+): number {
+  let radius = data.radius;
+  let x = data.x;
+  const y = data.y + data.offsetY;
+  let z = data.z;
+  // Taken from the UNCLAMPED radius, before the 200 clamp, as the patch does.
+  let marginRadius = radius - edgeMargin;
+  let pushes = 0;
+
+  if (radius > WALL_MAX_RADIUS) radius = WALL_MAX_RADIUS;
+
+  for (let i = 0; i < list.length; i++) {
+    const surf = list[i];
+    if (y < surf.lowerY || y > surf.upperY) continue;
+
+    const n = surf.normal;
+    const offset = n.x * x + n.y * y + n.z * z + surf.originOffset;
+    if (offset < 0 || offset > radius) continue;
+
+    // Not checking for the camera: ignore camera-only walls. (Vanish-cap walls
+    // stay solid — Mario isn't wearing the cap.)
+    if (surf.type === SURFACE_CAMERA_BOUNDARY) continue;
+
+    const a = surf.vertices[0];
+    const b = surf.vertices[1];
+    const c = surf.vertices[2];
+    const v0x = b[0] - a[0];
+    const v0y = b[1] - a[1];
+    const v0z = b[2] - a[2];
+    const v1x = c[0] - a[0];
+    const v1y = c[1] - a[1];
+    const v1z = c[2] - a[2];
+    const v2x = x - a[0];
+    const v2y = y - a[1];
+    const v2z = z - a[2];
+
+    // Face: barycentric coordinates of the point's projection onto the plane.
+    // The tests are written exactly as the patch's `goto edge_1_2` conditions
+    // so a NaN falls through to the face push the same way it does in C.
+    const d00 = v0x * v0x + v0y * v0y + v0z * v0z;
+    const d01 = v0x * v1x + v0y * v1y + v0z * v1z;
+    const d11 = v1x * v1x + v1y * v1y + v1z * v1z;
+    const d20 = v2x * v0x + v2y * v0y + v2z * v0z;
+    const d21 = v2x * v1x + v2y * v1y + v2z * v1z;
+    const invDenom = 1 / (d00 * d11 - d01 * d01);
+    const v = (d11 * d20 - d01 * d21) * invDenom;
+    if (!(v < 0 || v > 1)) {
+      const w = (d00 * d21 - d01 * d20) * invDenom;
+      if (!(w < 0 || w > 1 || v + w > 1)) {
+        x += n.x * (radius - offset);
+        z += n.z * (radius - offset);
+        pushes++;
+        if (data.numWalls < 4) data.walls[data.numWalls++] = surf;
+        continue;
+      }
+    }
+
+    // Edges 1-2, 1-3 (from vertex 1), then 2-3 (from vertex 2). The first edge
+    // spanning the point's height and within the margin pushes and ends this
+    // wall's test; a wall only reaches the next edge when the previous one
+    // didn't engage, so x/z are still the values the face test saw.
+    const e = edgePush(v0x, v0y, v0z, v2x, v2y, v2z, marginRadius, n.x, n.z) ??
+      edgePush(v1x, v1y, v1z, v2x, v2y, v2z, marginRadius, n.x, n.z) ??
+      edgePush(
+        c[0] - b[0], c[1] - b[1], c[2] - b[2],
+        x - b[0], y - b[1], z - b[2],
+        marginRadius, n.x, n.z,
+      );
+    if (e === null) continue;
+    x += e.dx;
+    z += e.dz;
+    marginRadius += FRAME_MARGIN_GROWTH;
+    pushes++;
+    if (e.recorded && data.numWalls < 4) data.walls[data.numWalls++] = surf;
+  }
+
+  data.x = x;
+  data.z = z;
+  return pushes;
+}
+
+/** Scratch result for edgePush (the probe calls this millions of times). */
+const edgeScratch = { dx: 0, dz: 0, recorded: false };
+
+/**
+ * One of the Frame patch's edge tests. `(ex, ey, ez)` is the edge vector from
+ * its start vertex, `(qx, qy, qz)` the query point relative to that vertex.
+ * Returns the horizontal push (and whether the wall counts as touched), or null
+ * when the edge doesn't span the point's height or is out of reach.
+ *
+ * Deviation, deliberately: at zero horizontal distance the patch divides 0/0
+ * and the game's position becomes NaN. A point exactly on an edge projects onto
+ * the triangle and takes the face push first, so this is only reachable when
+ * float rounding makes the face test miss — we push straight out along the
+ * wall normal instead of propagating a NaN into the probe.
+ */
+function edgePush(
+  ex: number, ey: number, ez: number,
+  qx: number, qy: number, qz: number,
+  marginRadius: number,
+  nx: number, nz: number,
+): typeof edgeScratch | null {
+  if (ey === 0) return null;
+  const t = qy / ey;
+  if (t < 0 || t > 1) return null;
+  let dx = ex * t - qx;
+  let dz = ez * t - qz;
+  const dist = Math.sqrt(dx * dx + dz * dz);
+  const offset = dist - marginRadius;
+  if (offset > 0) return null;
+  if (dist === 0) {
+    edgeScratch.dx = nx * marginRadius;
+    edgeScratch.dz = nz * marginRadius;
+    edgeScratch.recorded = true;
+    return edgeScratch;
+  }
+  const k = offset / dist;
+  dx *= k;
+  dz *= k;
+  edgeScratch.dx = dx;
+  edgeScratch.dz = dz;
+  edgeScratch.recorded = !(dx * nx + dz * nz < FRAME_CORNER_THRESHOLD * offset);
+  return edgeScratch;
 }

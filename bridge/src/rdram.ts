@@ -207,20 +207,26 @@ export interface GameState {
 }
 
 export function readState(rd: Rdram): GameState {
-  const m = US.gMarioStates;
+  // Position, surface pointers and heights in ONE read: the emulator keeps
+  // running while we read, and field-by-field reads could pair Mario's position
+  // from one frame with his floor pointer from the next — exactly the skew the
+  // oracle then reports as a mismatch.
+  const span = MARIO.floorHeight + 4 - MARIO.pos;
+  const b = rd.readBytes(US.gMarioStates + MARIO.pos, span);
+  const at = (field: number): number => field - MARIO.pos;
   return {
     level: rd.s16(US.gCurrLevelNum),
     area: rd.s16(US.gCurrAreaIndex),
     pos: {
-      x: rd.f32(m + MARIO.pos),
-      y: rd.f32(m + MARIO.pos + 4),
-      z: rd.f32(m + MARIO.pos + 8),
+      x: b.readFloatBE(at(MARIO.pos)),
+      y: b.readFloatBE(at(MARIO.pos) + 4),
+      z: b.readFloatBE(at(MARIO.pos) + 8),
     },
-    floorAddr: rd.u32(m + MARIO.floor),
-    ceilAddr: rd.u32(m + MARIO.ceil),
-    wallAddr: rd.u32(m + MARIO.wall),
-    floorHeight: rd.f32(m + MARIO.floorHeight),
-    ceilHeight: rd.f32(m + MARIO.ceilHeight),
+    floorAddr: b.readUInt32BE(at(MARIO.floor)),
+    ceilAddr: b.readUInt32BE(at(MARIO.ceil)),
+    wallAddr: b.readUInt32BE(at(MARIO.wall)),
+    floorHeight: b.readFloatBE(at(MARIO.floorHeight)),
+    ceilHeight: b.readFloatBE(at(MARIO.ceilHeight)),
     surfaceCount: rd.s32(US.gSurfacesAllocated),
   };
 }
@@ -231,6 +237,9 @@ export interface SurfacePool {
   /** Canonical big-endian bytes: count * 0x30. */
   bytes: Buffer;
 }
+
+/** Same sanity bound discovery uses (looksLikeSm64Us). */
+const MAX_SURFACES = 100000;
 
 /** Full RDRAM snapshot as canonical big-endian bytes. Tries expanded 8 MB
  * first (this hack uses the expansion pak), falling back to 4 MB. */
@@ -245,10 +254,18 @@ export function readRdramSnapshot(rd: Rdram): Buffer {
   throw new Error("RDRAM snapshot read failed");
 }
 
-export function readSurfacePool(rd: Rdram): SurfacePool {
+/** The current surface pool, or null while its anchors don't describe one —
+ * mid level load, or on the title screen, the count and pointer can be
+ * garbage. Reading them anyway meant allocating gigabytes for an absurd count,
+ * or a failed read that the exe took as "emulator gone" and tore down the
+ * attachment for a full rescan. Callers keep the last good pool instead. */
+export function readSurfacePool(rd: Rdram): SurfacePool | null {
   const count = rd.s32(US.gSurfacesAllocated);
   const poolBase = rd.u32(US.sSurfacePool);
-  const bytes =
-    count > 0 ? rd.readBytes(poolBase, count * SURFACE_STRUCT_SIZE) : Buffer.alloc(0);
-  return { count, poolBase, bytes };
+  if (count < 0 || count > MAX_SURFACES) return null;
+  if (count === 0) return { count, poolBase, bytes: Buffer.alloc(0) };
+  if (poolBase < 0x80000000 || poolBase + count * SURFACE_STRUCT_SIZE > RDRAM_KSEG0_END) {
+    return null;
+  }
+  return { count, poolBase, bytes: rd.readBytes(poolBase, count * SURFACE_STRUCT_SIZE) };
 }

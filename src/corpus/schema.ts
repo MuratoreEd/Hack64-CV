@@ -13,7 +13,7 @@
 // on the profile (wallThreshold), so parsed surfaces would freeze one engine's
 // interpretation into the ground truth. Bytes are what the game had.
 
-import type { FloorSelect } from "../collision/profile";
+import type { FloorSelect, WallModel } from "../collision/profile";
 
 /** Bump when a field changes meaning. Readers refuse versions they don't know. */
 export const CORPUS_SCHEMA_VERSION = 1;
@@ -31,6 +31,9 @@ export type LabelVerdict = "wall" | "clear";
 export interface CapturedProfile {
   wallThreshold: number;
   select: FloorSelect;
+  /** Wall routine. Absent in captures that predate it — readers then use
+   * wallsForThreshold(wallThreshold), which is what the app assumed. */
+  walls?: WallModel;
   /** False when neither patch signal had spoken yet — the label is then only
    * as good as the default, and the runner says so. */
   known: boolean;
@@ -57,6 +60,9 @@ export interface LabelRecord {
   area: number;
   /** World→collision scale in force when the label was taken. */
   worldScale: number;
+  /** Whether that scale had been measured on this level (vs carried over from
+   * the previous one). Absent in captures that predate the distinction. */
+  worldScaleVerified?: boolean;
   profile: CapturedProfile;
   /** Mario's position in WORLD units, i.e. what the HUD showed the user. */
   marioWorldPos: Vec3;

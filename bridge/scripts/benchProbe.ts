@@ -1,16 +1,24 @@
 // Clean single-run probe benchmark on the live pool (fresh process per mode,
 // no instrumentation). Also asserts accel/plain output equivalence when both
 // are run in one invocation.
-//   npx tsx scripts/benchProbe.ts accel|plain|both [worldScale]
+//   npx tsx scripts/benchProbe.ts accel|plain|both [worldScale] [--patched]
+//
+// --patched probes with Frame's patch profile (±0.05 threshold, its wall
+// routine, highest-floor selection) — what the app runs on such a ROM.
 
 import { ProcessMemory, findProject64Pid } from "../src/win32.js";
 import { discoverRdram, readSurfacePool } from "../src/rdram.js";
 import { parseSurfacePool } from "../../src/collision/surface.js";
 import { findInvisibleWalls } from "../../src/probe/invisibleWalls.js";
+import { sessionProbeOptions } from "../../src/probe/config.js";
+import { deriveBoundary } from "../../src/collision/partition.js";
+import { PATCHED_PROFILE, VANILLA_PROFILE } from "../../src/collision/profile.js";
 
 function main(): void {
-  const mode = process.argv[2] ?? "accel";
-  const worldScale = Number(process.argv[3] ?? 4);
+  const args = process.argv.slice(2).filter((a) => !a.startsWith("--"));
+  const mode = args[0] ?? "accel";
+  const worldScale = Number(args[1] ?? 4);
+  const profile = process.argv.includes("--patched") ? PATCHED_PROFILE : VANILLA_PROFILE;
   const pid = findProject64Pid();
   if (pid == null) throw new Error("Project64 not running");
   const proc = new ProcessMemory(pid);
@@ -18,21 +26,23 @@ function main(): void {
   if (!rd) throw new Error("RDRAM not found");
   const pool = readSurfacePool(rd);
   proc.close();
+  if (!pool) throw new Error("no valid surface pool (enter a level first)");
   const surfaces = parseSurfacePool(
     pool.bytes.buffer.slice(
       pool.bytes.byteOffset,
       pool.bytes.byteOffset + pool.bytes.byteLength,
     ),
     pool.count,
-    { baseAddress: pool.poolBase },
+    { baseAddress: pool.poolBase, wallThreshold: profile.wallThreshold },
   );
 
-  const opts = {
-    marioHeight: 160 / worldScale,
-    ledgeGrace: 100 / worldScale,
-    wallOffset: 60 / worldScale,
-    wallRadius: 50 / worldScale,
-  };
+  // The app's own session configuration, so the benchmark measures what runs.
+  const opts = sessionProbeOptions({
+    worldScale,
+    select: profile.select,
+    walls: profile.walls,
+    boundary: deriveBoundary(surfaces),
+  });
 
   const run = (accel: boolean) => {
     const t0 = process.hrtime.bigint();

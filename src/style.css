@@ -197,6 +197,10 @@ canvas {
   color: #6b7080;
 }
 
+.hud .hint.error {
+  color: #f87171;
+}
+
 /* Per-kind anomaly sub-toggles, indented under the master "Invisible walls". */
 .hud label.sub {
   margin: 2px 0 2px 20px;

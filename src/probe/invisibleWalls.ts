@@ -2,8 +2,10 @@
 //
 // Game mechanic (mario_step.c, perform_ground_quarter_step — verified verbatim
 // against n64decomp/sm64):
-//   0. `resolve_and_return_wall_collisions(nextPos, 60.0f, 50.0f)` — wall
-//      pushes move the step target BEFORE any floor/ceiling is looked up.
+//   0. `resolve_and_return_wall_collisions(nextPos, 30.0f, 24.0f)` then
+//      `(nextPos, 60.0f, 50.0f)` — wall pushes move the step target BEFORE any
+//      floor/ceiling is looked up. The lower one is what stops Mario at walls
+//      too short to reach +60 (curbs, low ledge faces).
 //   1. `if (floor == NULL) return GROUND_STEP_HIT_WALL_STOP_QSTEPS;`
 //   2. leave-ground branch `nextPos[1] > floorHeight + 100`:
 //        `if (nextPos[1] + 160 >= ceilHeight) return HIT_WALL_STOP_QSTEPS;`
@@ -51,18 +53,21 @@
 // truncated by the surfaces that bound it (or capped just above the level's
 // highest geometry when the column is open to the sky).
 //
-// Scale note: 160 (hitbox), 100 (leave-ground), and the wall push's 60 offset /
-// 50 radius live in mario_step.c and compare WORLD units → pass each /scale in
-// collision units. The +80 ceil offset and ±78 buffers live inside the
-// collision routines and stay raw (verified live against the 4× hack).
+// Scale note: 160 (hitbox), 100 (leave-ground), and the wall pushes' offsets /
+// radii live in mario_step.c and compare WORLD units → pass each /scale in
+// collision units. (Frame's patch confirms it for walls: on extended-boundary
+// ROMs its wall routine multiplies position, offset and radius by 1/4.) The +80
+// ceil offset and ±78 buffers live inside the collision routines and stay raw
+// (verified live against the 4× hack).
 
 import type { Surface } from "../collision/surface";
-import type { FloorSelect } from "../collision/profile";
+import type { FloorSelect, WallModel } from "../collision/profile";
 import { SurfaceKind, deriveLevelBounds } from "../collision/surface";
 import { SpatialPartition, deriveBoundary } from "../collision/partition";
 import {
   SURFACE_CAMERA_BOUNDARY,
   SURFACE_FLAG_DYNAMIC,
+  SURFACE_INTANGIBLE,
 } from "../collision/constants";
 
 export type InvisibleWallKind = "exposed-ceiling" | "out-of-bounds";
@@ -105,11 +110,20 @@ export interface ProbeOptions {
   step?: number;
   /** Perpendicular probe distance from the edge. */
   sideOffset?: number;
-  /** Wall-push y offset in collision units (world 60 / scale). */
+  /** Wall-push y offset in collision units (world 60 / scale). The ground
+   * step's lower push (30 / 24) and the air pushes are scaled from this and
+   * wallRadius / marioHeight. */
   wallOffset?: number;
   /** Wall-push radius in collision units (world 50 / scale). */
   wallRadius?: number;
-  /** Upper bound on samples per edge (guards huge triangles). */
+  /** Which wall routine the ROM runs (CollisionProfile.walls). Defaults to
+   * "vanilla". */
+  walls?: WallModel;
+  /** Frame's edge margin in collision units (1 / worldScale). */
+  edgeMargin?: number;
+  /** Upper bound on samples per edge (guards absurd triangles). Past it the
+   * spacing exceeds one unit and single-column pinholes can be stepped over,
+   * so it sits well above any real edge length. */
   maxSamplesPerEdge?: number;
   /** Level boundary for the probe's partition. Defaults to deriving it from
    * the FULL surface list (matching the game), not the static subset. */
@@ -284,6 +298,9 @@ export function mergeSegments(
 const now = (): number =>
   typeof performance !== "undefined" ? performance.now() : Date.now();
 
+/** The air pass tests this far above the marched ceiling's top vertex. */
+const AIR_TEST_LIFT = 2;
+
 interface StepBlock {
   kind: InvisibleWallKind;
   /** Full blocked vertical interval at the target column. */
@@ -312,11 +329,13 @@ export function findInvisibleWalls(
     // misleading here — its keep-names wrappers dwarf the per-query savings.
     accel: opts.accel ?? true,
     select: opts.select ?? "first",
+    walls: opts.walls ?? "vanilla",
+    edgeMargin: opts.edgeMargin ?? 1,
     // The probe never queries walls wider than its own push radius, so the
     // fine grid only needs to inflate wall footprints that far — the default
     // 200 over-inflates by 16× on a 4× hack and buries every bin in walls the
     // query can't reach. Wall lookups are the probe's hottest path (up to
-    // three per sample, millions of samples).
+    // four per sample, millions of samples).
     wallReach: opts.wallRadius ?? 50,
   });
   const marioHeight = opts.marioHeight ?? 160;
@@ -325,12 +344,16 @@ export function findInvisibleWalls(
   const side = opts.sideOffset ?? 1.5;
   const wallOffset = opts.wallOffset ?? 60;
   const wallRadius = opts.wallRadius ?? 50;
-  const maxSamples = opts.maxSamplesPerEdge ?? 2048;
+  const maxSamples = opts.maxSamplesPerEdge ?? 32768;
   const airPass = opts.airPass ?? true;
   const airMaxNormalY = opts.airMaxNormalY ?? -0.5;
   const cullInsideSolid = opts.cullInsideSolid ?? true;
-  // perform_air_quarter_step's wall pushes sit at +150/+30 world units (the
-  // ground step uses +60) with the same 50 radius; scale like marioHeight.
+  // perform_ground_quarter_step pushes (30, 24) BEFORE (60, 50); scaled from
+  // the configured upper push, like everything else in mario_step.c.
+  const groundLowerOffset = (30 / 60) * wallOffset;
+  const groundLowerRadius = (24 / 50) * wallRadius;
+  // perform_air_quarter_step's wall pushes sit at +150/+30 world units with
+  // the same 50 radius; scale like marioHeight.
   const airUpperOffset = (150 / 160) * marioHeight;
   const airLowerOffset = (30 / 160) * marioHeight;
 
@@ -368,6 +391,50 @@ export function findInvisibleWalls(
     return wCeil.height - wFloor.height > marioHeight ? wFloor.height : NaN;
   };
 
+  /** Apply two wall pushes in order at (x, y, z); wallData holds the result. */
+  const push2 = (
+    x: number, y: number, z: number,
+    off1: number, rad1: number, off2: number, rad2: number,
+  ): void => {
+    wallData.x = x;
+    wallData.y = y;
+    wallData.z = z;
+    wallData.offsetY = off1;
+    wallData.radius = rad1;
+    wallData.walls.length = 0;
+    wallData.numWalls = 0;
+    partition.findWallCollisionsInto(wallData);
+    wallData.offsetY = off2;
+    wallData.radius = rad2;
+    wallData.walls.length = 0;
+    wallData.numWalls = 0;
+    partition.findWallCollisionsInto(wallData);
+  };
+
+  /**
+   * Can Mario actually be standing at the approach column? The game applies
+   * the wall pushes to his position every frame, so he is never inside a
+   * wall's push radius in front of it: an approach column the pushes would
+   * move is somewhere he can't stand, and a block "seen" from there is not
+   * one he can walk into.
+   *
+   * Only asked under Frame's walls. Vanilla walls also push from BEHIND,
+   * shoving a step target that crossed the plane back out in front — which is
+   * what already keeps vanilla steps from sneaking past a wall from an
+   * unreachable approach (and what makes a back-facing wall a real, verified
+   * invisible wall). One-sided walls do neither, so without this every seam
+   * capped by a front-facing wall would light up. Checked only after a block
+   * is found: blocks are rare, pushes are the probe's hottest cost.
+   */
+  const frameWalls = partition.walls === "frame";
+  const approachStable = (
+    x: number, y: number, z: number,
+    off1: number, rad1: number, off2: number, rad2: number,
+  ): boolean => {
+    push2(x, y, z, off1, rad1, off2, rad2);
+    return Math.abs(wallData.x - x) < 0.01 && Math.abs(wallData.z - z) < 0.01;
+  };
+
   /**
    * Simulate perform_ground_quarter_step from approach height `py` into column
    * (tx, tz). Returns the blocking condition, or null when the step is free.
@@ -396,7 +463,9 @@ export function findInvisibleWalls(
   const floorAbove = (x: number, z: number, y: number): number => {
     const above = partition
       .floorsAt(x, z)
-      .filter((f) => f.height > y)
+      // An intangible floor never resets find_floor (Mario falls through it),
+      // under either selection rule.
+      .filter((f) => f.height > y && f.surface.type !== SURFACE_INTANGIBLE)
       .sort((a, b) => a.height - b.height);
     for (const f of above) {
       if (!shadowAware) return f.height;
@@ -497,19 +566,13 @@ export function findInvisibleWalls(
     dirX: number,
     dirZ: number,
   ): StepBlock | null => {
-    // Step 0: the game's wall pushes move the target before anything else.
-    // The push is one-sided in effect — engaged from the front it holds Mario
-    // outside (a wall caps its seam however shallow the leak); engaged from
-    // behind it shoves him forward through the plane. findWallCollisions
-    // preserves both, including the multi-wall over-push quirk.
-    wallData.x = tx;
-    wallData.y = py;
-    wallData.z = tz;
-    wallData.offsetY = wallOffset;
-    wallData.radius = wallRadius;
-    wallData.walls.length = 0;
-    wallData.numWalls = 0;
-    partition.findWallCollisionsInto(wallData);
+    // Step 0: the game's wall pushes move the target before anything else —
+    // the lower (30, 24) and then the upper (60, 50), exactly in that order.
+    // A wall engaged from the front holds Mario outside (a wall caps its seam
+    // however shallow the leak). From behind, vanilla shoves him forward
+    // through the plane, while Frame's patch ignores the back side; the
+    // partition runs whichever routine the ROM has (ProbeOptions.walls).
+    push2(tx, py, tz, groundLowerOffset, groundLowerRadius, wallOffset, wallRadius);
     tx = wallData.x;
     tz = wallData.z;
     partition.findFloorInto(tx, py, tz, tFloor);
@@ -596,7 +659,7 @@ export function findInvisibleWalls(
     wz: number,
     surfTopY: number,
   ): StepBlock | null => {
-    const yTest = surfTopY + 2;
+    const yTest = surfTopY + AIR_TEST_LIFT;
     // The approach column must be free air at the test height: over a void the
     // approach itself is an air wall (floor NULL → AIR_STEP_HIT_WALL), and on
     // interior seams both sides are blocked — neither is observable from
@@ -606,18 +669,7 @@ export function findInvisibleWalls(
     partition.findCeilInto(wx, wFloor.height + 80, wz, wCeil);
     if (wCeil.surface && yTest + marioHeight > wCeil.height) return null;
     // Air wall pushes move the target first: upper (150) then lower (30).
-    wallData.x = tx;
-    wallData.y = yTest;
-    wallData.z = tz;
-    wallData.offsetY = airUpperOffset;
-    wallData.radius = wallRadius;
-    wallData.walls.length = 0;
-    wallData.numWalls = 0;
-    partition.findWallCollisionsInto(wallData);
-    wallData.offsetY = airLowerOffset;
-    wallData.walls.length = 0;
-    wallData.numWalls = 0;
-    partition.findWallCollisionsInto(wallData);
+    push2(tx, yTest, tz, airUpperOffset, wallRadius, airLowerOffset, wallRadius);
     const ax = wallData.x;
     const az = wallData.z;
     partition.findFloorInto(ax, yTest, az, tFloor);
@@ -773,6 +825,15 @@ export function findInvisibleWalls(
             break;
           }
         }
+        if (
+          block && frameWalls &&
+          !approachStable(
+            wx, floorH, wz,
+            groundLowerOffset, groundLowerRadius, wallOffset, wallRadius,
+          )
+        ) {
+          block = null;
+        }
       }
       // Air pass, steep ceiling edges only, and only where the ground step
       // found nothing (never double-flags a cell). Runs even when there is no
@@ -788,6 +849,15 @@ export function findInvisibleWalls(
             break;
           }
         }
+        if (
+          block && frameWalls &&
+          !approachStable(
+            wx, surfTopY + AIR_TEST_LIFT, wz,
+            airUpperOffset, wallRadius, airLowerOffset, wallRadius,
+          )
+        ) {
+          block = null;
+        }
       }
       if (!block) continue;
       // Unreachable interior of a sealed structure: the block is the visible
@@ -799,7 +869,14 @@ export function findInvisibleWalls(
       // an air-only wall with no standable approach, the region's own base.
       const base = Number.isNaN(floorH) ? block.yLow : floorH;
 
-      if (run !== null && i === prevI + 1 && run.kind === block.kind) {
+      // A run continues only while the SAME surface blocks: a change of blocker
+      // along one edge (two ceilings meeting over it) starts a new segment, so
+      // every column is attributed — and inspected, and merged — by the
+      // ceiling that actually blocks it.
+      if (
+        run !== null && i === prevI + 1 && run.kind === block.kind &&
+        run.addr === block.blockerAddr
+      ) {
         run.x1 = mx;
         run.z1 = mz;
         run.yBase = Math.min(run.yBase, base);
@@ -835,6 +912,9 @@ export function findInvisibleWalls(
 
   for (const surf of staticSurfaces) {
     if (surf.type === SURFACE_CAMERA_BOUNDARY) continue;
+    // find_floor never returns an intangible floor to Mario, so what his steps
+    // see doesn't change across its edges — nothing to march.
+    if (surf.type === SURFACE_INTANGIBLE && surf.kind === SurfaceKind.Floor) continue;
     const walkSide =
       surf.kind === SurfaceKind.Ceiling
         ? ("out" as const)

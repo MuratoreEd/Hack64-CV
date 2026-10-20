@@ -119,6 +119,13 @@ Project64 (RDRAM) --ReadProcessMemory--> Node bridge (koffi) --WebSocket--> Web 
 The level boundary and partition geometry are **derived per level** from the loaded
 geometry rather than hardcoded, so boundary-extended hacks work correctly.
 
+**Collision patches.** Some hacks change the collision engine itself. The viewer
+recognises FramePerfection's *SM64CollisionPatcher* ("Frame's patch") by reading
+the patcher's own code edits back out of RAM, and then runs the patched wall
+routine (one-sided walls, rounded wall ends, no double pushes) and wall
+threshold instead of vanilla's. The HUD says what it detected and how sure it
+is — e.g. "read from the ROM's code" versus "assumed from the patch".
+
 ## Development
 
 ```bash

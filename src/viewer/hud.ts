@@ -11,25 +11,37 @@ import {
   ANOMALY_KINDS,
 } from "./palette";
 import type { OracleResult } from "../collision/oracle";
+import type { CollisionProfile } from "../collision/profile";
 import type { ProbeResult, InvisibleWallKind } from "../probe/invisibleWalls";
 import { APP_VERSION } from "../version";
 
 const swatchHex = (c: number): string => "#" + c.toString(16).padStart(6, "0");
 
 /** A picked anomaly, resolved to the surfaces behind it (built in main.ts,
- * which alone knows the surface pool and world scale). */
+ * which alone knows the surface pool and world scale). World units. */
 export interface InspectorInfo {
   kind: InvisibleWallKind;
-  /** World-space center of the segment (collision coords × scale). */
-  worldCenter: { x: number; y: number; z: number };
-  /** World-space vertical extent of the blocked region. */
-  regionLow: number;
-  regionHigh: number;
+  /** The clicked box itself: adjacent blocked cells sharing one interval. */
+  cells: { x: number; z: number; count: number; yLow: number; yHigh: number } | null;
+  /** The whole run (segment) the box belongs to: its union interval and the
+   * floor height Mario stood on when a step into it was blocked. */
+  runLow: number;
+  runHigh: number;
+  standY: number;
   samples: number;
   blockerAddr: number;
   blockerKind: string | null;
   sourceAddr: number;
   sourceKind: string | null;
+}
+
+/** Which collision engine the ROM was identified as, and on what evidence. */
+export interface ProfileInfo {
+  profile: CollisionProfile;
+  known: boolean;
+  thresholdSource: "code" | "partition" | null;
+  wallsSource: "code" | "threshold" | null;
+  selectSource: "observed" | "threshold" | null;
 }
 
 const hex = (a: number): string => (a ? "0x" + (a >>> 0).toString(16) : "none");
@@ -62,11 +74,14 @@ export interface Hud {
     area: number,
     pos: { x: number; y: number; z: number },
     scale?: number,
+    scaleVerified?: boolean,
   ): void;
   /** Update the "core vs game" panel, or pass null to hide it. */
   setOracle(result: OracleResult | null): void;
   /** Update the probe line (invisible-wall count + timing), or null to hide. */
   setProbe(result: ProbeResult | null): void;
+  /** Report a probe run that failed. */
+  setProbeError(message: string): void;
   /** Show the inspector for a picked anomaly, or null to clear it. */
   setInspector(info: InspectorInfo | null): void;
   /** Show/hide the textured-view toggle (once a level model is parsed). */
@@ -75,11 +90,11 @@ export interface Hud {
   setSkyboxAvailable(available: boolean): void;
   /** Show/hide the fog toggle (once the level's fog is parsed). */
   setFogAvailable(available: boolean): void;
-  /** Show/hide the "probing…" banner while probe runs are in flight. */
-  setProbeBusy(busy: boolean): void;
-  /** Which collision engine the ROM was identified as, and whether that's
-   * confirmed (vs the unproven default). */
-  setProfile(name: "vanilla" | "patched", latched: boolean): void;
+  /** Show/hide the "probing…" banner while probe runs are in flight (or the
+   * probe is waiting on something — pass the reason as `text`). */
+  setProbeBusy(busy: boolean, text?: string): void;
+  /** Which collision engine the ROM was identified as, and on what evidence. */
+  setProfile(info: ProfileInfo): void;
   /** Enable the ground-truth capture panel (needs a live pool + position). */
   setCaptureReady(ready: boolean): void;
 }
@@ -402,8 +417,17 @@ export function createHud(
     setCounts(counts) {
       for (const kind of ORDER) countEls[kind].textContent = String(counts[kind]);
     },
-    setContext(level, area, pos, scale) {
-      const sc = scale === undefined || scale === 1 ? "" : ` · scale ${scale}×`;
+    setContext(level, area, pos, scale, scaleVerified) {
+      // An unmeasured scale is shown even at 1×: a scale carried over from
+      // another level is exactly the silent 4× error this line exists to expose.
+      const sc =
+        scale === undefined
+          ? ""
+          : scaleVerified === false
+            ? ` · scale ${scale}× (not yet measured here)`
+            : scale === 1
+              ? ""
+              : ` · scale ${scale}×`;
       context.textContent =
         `level ${level} · area ${area}${sc}\n` +
         `mario (${pos.x.toFixed(0)}, ${pos.y.toFixed(0)}, ${pos.z.toFixed(0)})`;
@@ -456,9 +480,16 @@ export function createHud(
         kindLabels[k].style.display = counts[k] > 0 ? "" : "none";
       }
       probeLine.textContent = `probe: ${result.elapsedMs.toFixed(0)}ms`;
+      probeLine.classList.remove("error");
       probeLine.title =
         `${result.ceilingsProbed} ceilings + ${result.floorsProbed} floors marched, ` +
         `${result.samplesProbed} samples`;
+    },
+    setProbeError(message) {
+      probeLine.style.display = "";
+      probeLine.classList.add("error");
+      probeLine.textContent = `probe failed: ${message}`;
+      probeLine.title = "";
     },
     setInspector(info) {
       if (!info) {
@@ -468,18 +499,28 @@ export function createHud(
       inspector.style.display = "block";
       inspector.style.borderLeftColor = swatchHex(ANOMALY_KIND_COLOR[info.kind]);
       inspTitle.textContent = ANOMALY_KIND_LABEL[info.kind];
-      const c = info.worldCenter;
-      const lines = [`at (${c.x.toFixed(0)}, ${c.y.toFixed(0)}, ${c.z.toFixed(0)})`];
-      lines.push(
-        `spans y ${info.regionLow.toFixed(0)} → ${info.regionHigh.toFixed(0)}`,
-      );
+      const lines: string[] = [];
+      const c = info.cells;
+      if (c) {
+        // The clicked box's own numbers: every cell in it has this interval.
+        lines.push(
+          c.count === 1
+            ? `column at (${c.x.toFixed(0)}, ${c.z.toFixed(0)})`
+            : `${c.count} columns around (${c.x.toFixed(0)}, ${c.z.toFixed(0)})`,
+        );
+        lines.push(`blocked y ${c.yLow.toFixed(0)} → ${c.yHigh.toFixed(0)}`);
+      }
       if (info.blockerAddr) {
         lines.push(`blocked by ${info.blockerKind ?? "surface"} ${hex(info.blockerAddr)}`);
       } else {
         lines.push("no blocking surface (missing floor)");
       }
+      lines.push(`stepping from floor y ${info.standY.toFixed(0)}`);
       lines.push(`edge ${info.sourceKind ?? "surface"} ${hex(info.sourceAddr)}`);
-      lines.push(`${info.samples} sample${info.samples === 1 ? "" : "s"} merged`);
+      lines.push(
+        `run: ${info.samples} sample${info.samples === 1 ? "" : "s"}, ` +
+          `y ${info.runLow.toFixed(0)} → ${info.runHigh.toFixed(0)} overall`,
+      );
       inspBody.textContent = lines.join("\n");
     },
     setTexturedAvailable(available) {
@@ -491,19 +532,32 @@ export function createHud(
     setFogAvailable(available) {
       fogLabel.style.display = available ? "" : "none";
     },
-    setProbeBusy(busy) {
+    setProbeBusy(busy, text) {
       probing.style.display = busy ? "" : "none";
+      probing.textContent = text ?? "Probing invisible walls…";
     },
-    setProfile(name, latched) {
-      if (!latched) {
+    setProfile(info) {
+      if (!info.known) {
         profileLine.style.display = "none";
         return;
       }
+      const p = info.profile;
+      const patched = p.wallThreshold === 0.05 || p.walls === "frame";
+      const via = (s: string | null) =>
+        s === "code" ? "read from the ROM's code"
+          : s === "partition" ? "inferred from the level's partition"
+            : s === "observed" ? "observed under Mario"
+              : s === "threshold" ? "assumed from the patch"
+                : "default";
       profileLine.style.display = "";
       profileLine.textContent =
-        name === "patched"
-          ? "Frame's patch detected"
-          : "collision: vanilla (unpatched)";
+        (patched ? "Frame's patch detected" : "collision: vanilla (unpatched)") +
+        `\nfloor pick: ${p.select === "extreme" ? "highest" : "first in list"}` +
+        ` (${via(info.selectSource)})`;
+      profileLine.title =
+        `wall threshold ±${p.wallThreshold} (${via(info.thresholdSource)})\n` +
+        `wall routine: ${p.walls === "frame" ? "one-sided (Frame)" : "vanilla"}` +
+        ` (${via(info.wallsSource)})`;
     },
     setCaptureReady(ready) {
       if (!callbacks.onCaptureLabel || ready === captureReady) return;

@@ -1,7 +1,10 @@
 import { describe, it, expect } from "vitest";
 import { makeSurface } from "./geometry";
-import { detectWallThreshold } from "./patchDetect";
+import { detectWallThreshold, readPoolFromRdram } from "./patchDetect";
+import { detectPatchSignatures } from "./patchSignatures";
 import { SURFACE_FLAG_DYNAMIC } from "./constants";
+import { encodeSurfacePool } from "./surfaceEncode";
+import { parseSurfacePool } from "./surface";
 import type { Surface } from "./surface";
 
 // A fake RDRAM image containing SurfaceNode chains, so the detector can be
@@ -121,6 +124,30 @@ describe("detectWallThreshold", () => {
     expect(r.examined).toBe(0);
   });
 
+  it("a node at the END of its list proves nothing", () => {
+    // Nothing follows it to look at. On a vanilla ROM a disputed floor that
+    // sorts last in its cell would otherwise count as a wall-list vote — two of
+    // those used to be enough to call a vanilla ROM patched.
+    const rdram = image([
+      [A_SHALLOW, A_DISPUTED],
+      [A_SHALLOW, A_DISPUTED],
+    ]);
+    const r = detectWallThreshold(rdram, [disputed, steepFloor, shallow]);
+    expect(r.wallThreshold).toBeNull();
+    expect(r.wallListVotes).toBe(0);
+  });
+
+  it("finds nodes BELOW the surface pool (vanilla's allocation order)", () => {
+    // alloc_surface_pools allocates the node pool first and main_pool_alloc
+    // grows upward, so on vanilla every node sits under the surfaces. An old
+    // "nodes live above the pool" filter made vanilla undetectable.
+    const hi = (a: number) => a + 0x300000; // surfaces above the nodes (0x80300000)
+    const s = (a: number, ny: number) => surf(hi(a), ny);
+    const rdram = image([[hi(A_DISPUTED), hi(A_STEEP_FLOOR)]]);
+    const r = detectWallThreshold(rdram, [s(A_DISPUTED, 0.03), s(A_STEEP_FLOOR, 0.8)]);
+    expect(r.wallThreshold).toBe(0.01);
+  });
+
   it("skips dynamic surfaces, whose nodes are rebuilt every frame", () => {
     const rdram = image([
       [A_SHALLOW, A_DISPUTED, A_SHALLOW],
@@ -130,5 +157,89 @@ describe("detectWallThreshold", () => {
     expect(
       detectWallThreshold(rdram, [dyn, steepFloor, shallow]).wallThreshold,
     ).toBeNull();
+  });
+});
+
+describe("readPoolFromRdram", () => {
+  it("reads the pool the snapshot itself holds", () => {
+    const pool = [surf(0, 0.8), surf(0, -0.8)].map((s, i) => ({ ...s, index: i }));
+    const bytes = new Uint8Array(encodeSurfacePool(pool));
+    const rdram = new Uint8Array(RDRAM);
+    const view = new DataView(rdram.buffer);
+    const base = 0x80250000;
+    rdram.set(bytes, base & 0x1fffffff);
+    view.setInt32(0x361170, pool.length); // gSurfacesAllocated
+    view.setUint32(0x38ee9c, base); // sSurfacePool
+    const got = readPoolFromRdram(rdram)!;
+    expect(got.count).toBe(2);
+    expect(got.base).toBe(base);
+    const parsed = parseSurfacePool(
+      got.bytes.slice().buffer as ArrayBuffer, got.count, { baseAddress: got.base },
+    );
+    expect(parsed.map((s) => s.normal.y)).toEqual([
+      expect.closeTo(0.8, 5), expect.closeTo(-0.8, 5),
+    ]);
+  });
+
+  it("returns null for anchors that don't describe a pool", () => {
+    const rdram = new Uint8Array(RDRAM);
+    expect(readPoolFromRdram(rdram)).toBeNull(); // count 0
+    new DataView(rdram.buffer).setInt32(0x361170, 5);
+    expect(readPoolFromRdram(rdram)).toBeNull(); // pool pointer 0
+    expect(readPoolFromRdram(new Uint8Array(16))).toBeNull();
+  });
+});
+
+describe("detectPatchSignatures (the patcher's own edits, read from RAM)", () => {
+  // RAM addresses of the patcher's ROM offsets (engine segment ROM 0xF5580 →
+  // RAM 0x80378800): the two JALs, the band-aid JAL, the threshold doubles.
+  const JAL1 = 0x380f98;
+  const JAL2 = 0x380fe8;
+  const BAND_AID = 0x38100c;
+  const THRESH = 0x38bbb0;
+  const jal = (target: number) => (0x0c000000 | ((target & 0x0fffffff) >>> 2)) >>> 0;
+  const PROLOGUE = [
+    0x27bdff20, 0xafbf0054, 0xafb30050, 0xafb2004c, 0xafb10048, 0xafb00044,
+    0xf7be0038, 0xf7bc0030, 0xf7ba0028, 0xf7b80020, 0xf7b60018, 0xf7b40010,
+    0xc4aa0010,
+  ];
+  const ram = (opts: { frame?: boolean; bandAid?: boolean; threshold?: number }) => {
+    const rdram = new Uint8Array(0x420000);
+    const v = new DataView(rdram.buffer);
+    const routine = opts.frame ? 0x80401000 : 0x80380690;
+    v.setUint32(JAL1, jal(routine));
+    v.setUint32(JAL2, jal(routine));
+    if (opts.frame) PROLOGUE.forEach((w, i) => v.setUint32(0x401000 + i * 4, w));
+    if (opts.bandAid) v.setUint32(BAND_AID, jal(0x80380690));
+    if (opts.threshold !== undefined) {
+      v.setFloat64(THRESH, opts.threshold);
+      v.setFloat64(THRESH + 8, -opts.threshold);
+    }
+    return rdram;
+  };
+
+  it("recognises vanilla", () => {
+    expect(detectPatchSignatures(ram({ threshold: 0.01 }))).toEqual({
+      walls: "vanilla", wallThreshold: 0.01,
+    });
+  });
+
+  it("recognises Frame's patch, ignoring its extended-boundary band-aid call", () => {
+    // The band-aid JAL targets the OLD routine; counting it would read "mixed".
+    expect(detectPatchSignatures(ram({ frame: true, bandAid: true, threshold: 0.05 }))).toEqual({
+      walls: "frame", wallThreshold: 0.05,
+    });
+  });
+
+  it("says nothing it can't back up", () => {
+    // A JAL into expansion RAM that isn't the patch's routine: some other patch.
+    const r = ram({ threshold: 0.02 });
+    const v = new DataView(r.buffer);
+    v.setUint32(JAL1, jal(0x80401000));
+    v.setUint32(JAL2, jal(0x80401000));
+    expect(detectPatchSignatures(r)).toEqual({ walls: null, wallThreshold: null });
+    expect(detectPatchSignatures(new Uint8Array(0x100))).toEqual({
+      walls: null, wallThreshold: null,
+    });
   });
 });

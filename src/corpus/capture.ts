@@ -22,6 +22,7 @@ export interface CaptureSession {
   level: number;
   area: number;
   worldScale: number;
+  worldScaleVerified: boolean;
   profile: CapturedProfile;
   marioWorldPos: Vec3;
 }
@@ -38,6 +39,7 @@ export async function buildCapture(
     level: session.level,
     area: session.area,
     worldScale: session.worldScale,
+    worldScaleVerified: session.worldScaleVerified,
     profile: session.profile,
     marioWorldPos: session.marioWorldPos,
     label,

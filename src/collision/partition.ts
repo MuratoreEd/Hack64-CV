@@ -18,13 +18,15 @@ import {
   FLOOR_LOWER_LIMIT,
   CELL_HEIGHT_LIMIT,
   SURFACE_CAMERA_BOUNDARY,
+  SURFACE_INTANGIBLE,
 } from "./constants";
-import type { FloorSelect } from "./profile";
+import type { FloorSelect, WallModel } from "./profile";
 import {
   toS16,
   findFloorFromListInto,
   findCeilFromListInto,
   findWallCollisionsFromList,
+  findWallCollisionsFromListFrame,
   floorContainsXZ,
   type SurfaceHit,
   type WallCollisionData,
@@ -78,21 +80,25 @@ export interface PartitionOptions {
    * first-hit-wins, "extreme" = highest floor / lowest ceiling (ROMs whose
    * collision patch fixes surface cucking). Defaults to "first". */
   select?: FloorSelect;
-  /** How far outside its XZ bbox a wall may influence a query — the fine grid
-   * inflates wall footprints by this much. Defaults to WALL_MAX_RADIUS (200),
-   * correct for any radius the game itself uses. A caller that only ever
-   * queries with a small radius can pass that instead and get far smaller wall
-   * bins: the probe uses radius 50/scale, so on a 4× hack 200 over-inflates by
-   * 16× and stuffs every bin with walls it can never touch. Queries with a
-   * radius LARGER than this automatically fall back to the coarse cell list,
-   * so shrinking it can never change a result. */
+  /** The largest wall-query radius the fine grid is built for. Defaults to
+   * WALL_MAX_RADIUS (200), correct for any radius the game itself uses. A
+   * caller that only ever queries with a small radius can pass that instead
+   * and get far smaller wall bins: the probe uses radius 50/scale, so on a 4×
+   * hack 200 over-inflates by 16× and stuffs every bin with walls it can never
+   * touch. Queries with a radius LARGER than this automatically fall back to
+   * the coarse cell list, so shrinking it can never change a result. */
   wallReach?: number;
+  /** Which find_wall_collisions_from_list the ROM runs (CollisionProfile.walls).
+   * Defaults to "vanilla". */
+  walls?: WallModel;
+  /** Frame's patch only: its edge margin (`radius - 1.0f`) in collision units —
+   * 1 on a regular ROM, 1/worldScale on an extended-boundary one. */
+  edgeMargin?: number;
 }
 
 /** Fine bins per axis inside one partition cell. */
 const FINE = 8;
-/** find_wall_collisions clamps radius to WALL_MAX_RADIUS (200), so a wall can
- * influence points at most this far outside its XZ bbox. */
+/** find_wall_collisions clamps radius to WALL_MAX_RADIUS (200). */
 const WALL_REACH = 200;
 
 /** Per-cell fine bins: FINE×FINE sparse lists per surface kind, each list
@@ -105,13 +111,35 @@ interface FineCell {
 
 const EMPTY_LIST: Surface[] = [];
 
+const NO_INFLATION = [0, 0] as const;
+const noInflation = (): readonly [number, number] => NO_INFLATION;
+
+/**
+ * The order add_surface_to_cell leaves a list in. It inserts each surface
+ * before the first entry of strictly lower priority (`vertex1[1] * sortDir`,
+ * held in an s16), i.e. after every entry whose priority is >= its own — which
+ * is exactly a STABLE sort by descending priority over pool order. Sorting once
+ * is O(n log n) instead of the game's O(n²) insertion (a dense 12k-surface pool
+ * rebuilds the oracle's partition on every stream update). Walls (sortDir 0)
+ * need no sort.
+ */
+function sortByPriority(list: Surface[], sortDir: 1 | -1): void {
+  if (list.length < 2) return;
+  const prio = new Map<Surface, number>();
+  for (const s of list) prio.set(s, toS16(s.vertices[0][1] * sortDir));
+  list.sort((a, b) => prio.get(b)! - prio.get(a)!);
+}
+
 export class SpatialPartition {
   readonly boundary: number;
   readonly numCells: number;
   readonly cellSize: number;
   readonly select: FloorSelect;
-  /** Wall-bbox inflation used when building the fine grid (see wallReach). */
+  readonly walls: WallModel;
+  /** Largest wall-query radius the fine grid serves (see wallReach). */
   readonly wallReach: number;
+  /** Frame's edge margin in collision units (see PartitionOptions.edgeMargin). */
+  readonly edgeMargin: number;
   private readonly cellsIndex: number; // NUM_CELLS_INDEX = numCells - 1
   private readonly staticCells: Cell[]; // flat [z * numCells + x]
   private readonly dynamicCells: Cell[];
@@ -122,6 +150,8 @@ export class SpatialPartition {
     this.boundary = opts.boundary ?? deriveBoundary(surfaces);
     this.numCells = opts.numCells ?? VANILLA_NUM_CELLS;
     this.select = opts.select ?? "first";
+    this.walls = opts.walls ?? "vanilla";
+    this.edgeMargin = opts.edgeMargin ?? 1;
     this.wallReach = Math.min(opts.wallReach ?? WALL_REACH, WALL_REACH);
     // CELL_SIZE = LEVEL_BOUNDARY_MAX / (NUM_CELLS / 2) = 2*boundary / numCells.
     this.cellSize = (2 * this.boundary) / this.numCells;
@@ -136,6 +166,13 @@ export class SpatialPartition {
     }
 
     for (const surf of surfaces) this.addSurface(surf);
+    for (const cells of [this.staticCells, this.dynamicCells]) {
+      for (const cell of cells) {
+        sortByPriority(cell.floors, 1);
+        sortByPriority(cell.ceilings, -1);
+        // Walls are sortDir 0: every priority ties, so pool order as appended.
+      }
+    }
 
     if (opts.accel) {
       this.fineStatic = this.buildFine(this.staticCells);
@@ -152,12 +189,11 @@ export class SpatialPartition {
     const dynamic = (surf.flags & SURFACE_FLAG_DYNAMIC) !== 0;
     const cells = dynamic ? this.dynamicCells : this.staticCells;
 
-    const xs = [surf.vertices[0][0], surf.vertices[1][0], surf.vertices[2][0]];
-    const zs = [surf.vertices[0][2], surf.vertices[1][2], surf.vertices[2][2]];
-    const minX = Math.min(xs[0], xs[1], xs[2]);
-    const maxX = Math.max(xs[0], xs[1], xs[2]);
-    const minZ = Math.min(zs[0], zs[1], zs[2]);
-    const maxZ = Math.max(zs[0], zs[1], zs[2]);
+    const v = surf.vertices;
+    const minX = Math.min(v[0][0], v[1][0], v[2][0]);
+    const maxX = Math.max(v[0][0], v[1][0], v[2][0]);
+    const minZ = Math.min(v[0][2], v[1][2], v[2][2]);
+    const maxZ = Math.max(v[0][2], v[1][2], v[2][2]);
 
     const minCellX = this.lowerCellIndex(minX);
     const maxCellX = this.upperCellIndex(maxX);
@@ -166,38 +202,14 @@ export class SpatialPartition {
 
     for (let cz = minCellZ; cz <= maxCellZ; cz++) {
       for (let cx = minCellX; cx <= maxCellX; cx++) {
-        this.addSurfaceToCell(cells[cz * this.numCells + cx], surf);
+        // add_surface_to_cell picks the list by normal.y; the order within
+        // each list is settled once every surface is in (sortByPriority).
+        const cell = cells[cz * this.numCells + cx];
+        if (surf.kind === SurfaceKind.Floor) cell.floors.push(surf);
+        else if (surf.kind === SurfaceKind.Ceiling) cell.ceilings.push(surf);
+        else cell.walls.push(surf);
       }
     }
-  }
-
-  /** add_surface_to_cell: choose the list by normal.y, insert keeping the
-   * game's sort ("surface cucking"): floors high->low by vertex1.y, ceilings
-   * low->high, walls in insertion (pool) order. */
-  private addSurfaceToCell(cell: Cell, surf: Surface): void {
-    let list: Surface[];
-    let sortDir: number;
-    if (surf.kind === SurfaceKind.Floor) {
-      list = cell.floors;
-      sortDir = 1;
-    } else if (surf.kind === SurfaceKind.Ceiling) {
-      list = cell.ceilings;
-      sortDir = -1;
-    } else {
-      list = cell.walls;
-      sortDir = 0;
-    }
-
-    const surfacePriority = surf.vertices[0][1] * sortDir;
-    // Insert before the first element with strictly lower priority (`>` break),
-    // so equal-priority surfaces keep insertion order; sortDir 0 always appends.
-    let i = 0;
-    while (i < list.length) {
-      const priority = list[i].vertices[0][1] * sortDir;
-      if (surfacePriority > priority) break;
-      i++;
-    }
-    list.splice(i, 0, surf);
   }
 
   // --- Fine-grid pre-filter (accel option) ---
@@ -213,14 +225,46 @@ export class SpatialPartition {
           ceilings: new Array(FINE * FINE).fill(null),
           walls: new Array(FINE * FINE).fill(null),
         };
-        this.scatter(cell.floors, fine.floors, cx, cz, 0);
-        this.scatter(cell.ceilings, fine.ceilings, cx, cz, 0);
-        // Walls influence points up to wallReach outside their bbox.
-        this.scatter(cell.walls, fine.walls, cx, cz, this.wallReach);
+        this.scatter(cell.floors, fine.floors, cx, cz, noInflation);
+        this.scatter(cell.ceilings, fine.ceilings, cx, cz, noInflation);
+        this.scatter(cell.walls, fine.walls, cx, cz, (w) => this.wallInflation(w));
         out[idx] = fine;
       }
     }
     return out;
+  }
+
+  /**
+   * How far outside its XZ bbox a wall can engage a query of radius up to
+   * wallReach, per axis. The fine grid's superset guarantee rests on this.
+   *
+   * Vanilla: the in-plane test projects along one axis, so the point must lie
+   * within the wall's extent on the OTHER axis but can sit radius/|n_axis|
+   * off it along the projection axis — up to √2·radius for a 45° wall, not
+   * radius. (Inflating by radius alone missed diagonal walls near bin borders:
+   * a 45° wall pushed a point in the plain partition and not in the accel one.)
+   * +1 on both axes because the bin is picked from the s16-truncated position
+   * while the test runs on the float one.
+   *
+   * Frame: face pushes reach radius·|n_xz| and edge pushes the edge margin,
+   * both <= radius + a hair. But its pushes accumulate, so the point MOVES
+   * mid-scan: the inflation also covers one push's worth of travel, and
+   * findWallCollisionsInto rescans the coarse list if a scan pushed twice.
+   */
+  private wallInflation(w: Surface): readonly [number, number] {
+    const r = this.wallReach;
+    if (this.walls === "frame") {
+      const i = 2 * r + 2;
+      return [i, i];
+    }
+    const cap = this.cellSize; // a whole cell covers every bin: always safe
+    const n = w.normal;
+    if (w.xProjection) {
+      const ax = Math.abs(n.x);
+      return [ax > 0 ? Math.min(cap, r / ax + 1) : cap, 1];
+    }
+    const az = Math.abs(n.z);
+    return [1, az > 0 ? Math.min(cap, r / az + 1) : cap];
   }
 
   /** Scatter one cell list into its fine bins by (inflated) XZ bbox, keeping
@@ -231,7 +275,7 @@ export class SpatialPartition {
     bins: (Surface[] | null)[],
     cx: number,
     cz: number,
-    inflate: number,
+    inflation: (s: Surface) => readonly [number, number],
   ): void {
     const loX = cx * this.cellSize - this.boundary;
     const loZ = cz * this.cellSize - this.boundary;
@@ -239,11 +283,12 @@ export class SpatialPartition {
     const bin = (v: number, lo: number): number =>
       Math.min(FINE - 1, Math.max(0, Math.trunc((v - lo) / fineSize)));
     for (const surf of list) {
+      const [ix, iz] = inflation(surf);
       const v = surf.vertices;
-      const minX = Math.min(v[0][0], v[1][0], v[2][0]) - inflate;
-      const maxX = Math.max(v[0][0], v[1][0], v[2][0]) + inflate;
-      const minZ = Math.min(v[0][2], v[1][2], v[2][2]) - inflate;
-      const maxZ = Math.max(v[0][2], v[1][2], v[2][2]) + inflate;
+      const minX = Math.min(v[0][0], v[1][0], v[2][0]) - ix;
+      const maxX = Math.max(v[0][0], v[1][0], v[2][0]) + ix;
+      const minZ = Math.min(v[0][2], v[1][2], v[2][2]) - iz;
+      const maxZ = Math.max(v[0][2], v[1][2], v[2][2]) + iz;
       const bx0 = bin(minX, loX);
       const bx1 = bin(maxX, loX);
       const bz0 = bin(minZ, loZ);
@@ -320,8 +365,9 @@ export class SpatialPartition {
   /** Scratch hit for the dynamic half of the Into queries (single-threaded). */
   private readonly dynScratch: SurfaceHit = { surface: null, height: 0 };
 
-  /** find_floor: truncates position to s16, checks the boundary, then merges the
-   * static and dynamic cell results (dynamic wins only if strictly higher). */
+  /** find_floor: truncates position to s16, checks the boundary, falls through
+   * an intangible static floor, then merges the static and dynamic cell
+   * results (dynamic wins only if strictly higher). */
   findFloor(xPos: number, yPos: number, zPos: number): SurfaceHit {
     const out: SurfaceHit = { surface: null, height: 0 };
     this.findFloorInto(xPos, yPos, zPos, out);
@@ -367,10 +413,20 @@ export class SpatialPartition {
       this.candidates(this.fineDynamic, this.dynamicCells, idx, cxi, czi, "floors", x, z),
       x, y, z, dyn, select,
     );
-    findFloorFromListInto(
-      this.candidates(this.fineStatic, this.staticCells, idx, cxi, czi, "floors", x, z),
-      x, y, z, out, select,
+    const staticList = this.candidates(
+      this.fineStatic, this.staticCells, idx, cxi, czi, "floors", x, z,
     );
+    findFloorFromListInto(staticList, x, y, z, out, select);
+    // Mario falls through SURFACE_INTANGIBLE (gFindFloorIncludeSurfaceIntangible
+    // is only ever set for room lookups): the static list is searched again
+    // from `(s32)(height - 200.0f)`. When nothing is found there the game keeps
+    // the intangible floor's HEIGHT with a NULL floor (the "BBH crash" quirk),
+    // and that height is what the dynamic floor then has to beat.
+    if (out.surface !== null && out.surface.type === SURFACE_INTANGIBLE) {
+      const h = out.height;
+      findFloorFromListInto(staticList, x, Math.trunc(h - 200), z, out, select);
+      if (out.surface === null) out.height = h;
+    }
     if (dyn.height > out.height) {
       out.surface = dyn.surface;
       out.height = dyn.height;
@@ -489,7 +545,8 @@ export class SpatialPartition {
   }
 
   /** Allocation-free find_wall_collisions: `data` carries the query in and the
-   * pushed position out. Callers reset walls/numWalls or reuse a scratch. */
+   * pushed position out. Callers reset walls/numWalls or reuse a scratch.
+   * Dispatches to the ROM's wall routine (PartitionOptions.walls). */
   findWallCollisionsInto(data: WallCollisionData): void {
     const x = toS16(data.x);
     const z = toS16(data.z);
@@ -501,15 +558,47 @@ export class SpatialPartition {
     // The fine grid only guarantees a superset for radii it was inflated for;
     // anything wider must use the full cell list (see PartitionOptions.wallReach).
     const wide = Math.abs(data.radius) > this.wallReach;
-    const fineDyn = wide ? null : this.fineDynamic;
-    const fineSta = wide ? null : this.fineStatic;
-    findWallCollisionsFromList(
-      this.candidates(fineDyn, this.dynamicCells, idx, cxi, czi, "walls", x, z),
-      data,
+    // The game picks the cell ONCE, from the original position, for both lists,
+    // but the static scan starts wherever the dynamic pushes left the point —
+    // possibly outside the original fine bin, so it then takes the full list.
+    const dynPushes = this.scanWalls(
+      wide ? null : this.fineDynamic, this.dynamicCells, idx, cxi, czi, x, z, data,
     );
-    findWallCollisionsFromList(
-      this.candidates(fineSta, this.staticCells, idx, cxi, czi, "walls", x, z),
-      data,
+    this.scanWalls(
+      wide || dynPushes > 0 ? null : this.fineStatic,
+      this.staticCells, idx, cxi, czi, x, z, data,
     );
+  }
+
+  /** One find_wall_collisions_from_list pass over a cell's wall list (or its
+   * fine bin), returning the pushes applied. Frame's routine moves the point
+   * as it goes; a fine bin only covers one push of travel, so a bin scan that
+   * pushed more is discarded and redone on the full list — identical results,
+   * and the (rare) corner cases pay for the full scan. */
+  private scanWalls(
+    fine: FineCell[] | null,
+    cells: Cell[],
+    idx: number,
+    cxi: number,
+    czi: number,
+    x: number,
+    z: number,
+    data: WallCollisionData,
+  ): number {
+    const list = this.candidates(fine, cells, idx, cxi, czi, "walls", x, z);
+    if (this.walls !== "frame") return findWallCollisionsFromList(list, data);
+    if (fine === null) {
+      return findWallCollisionsFromListFrame(list, data, this.edgeMargin);
+    }
+    const sx = data.x;
+    const sz = data.z;
+    const sn = data.numWalls;
+    const pushes = findWallCollisionsFromListFrame(list, data, this.edgeMargin);
+    if (pushes < 2) return pushes;
+    data.x = sx;
+    data.z = sz;
+    data.numWalls = sn;
+    data.walls.length = sn;
+    return findWallCollisionsFromListFrame(cells[idx].walls, data, this.edgeMargin);
   }
 }

@@ -3,6 +3,7 @@ import { makeSurface } from "../collision/geometry";
 import { findInvisibleWalls, mergeSegments } from "./invisibleWalls";
 import type { InvisibleWallSegment } from "./invisibleWalls";
 import type { Surface } from "../collision/surface";
+import { SURFACE_INTANGIBLE } from "../collision/constants";
 
 // A segment fixture on the XZ line the fields describe, with sane defaults.
 const seg = (p: Partial<InvisibleWallSegment>): InvisibleWallSegment => ({
@@ -51,6 +52,13 @@ const capWall = (top = 200): Surface[] => [
 const backWall = (): Surface[] => [
   makeSurface([0, 0, -200], [0, 0, 200], [0, 200, 200], { address: 0x300 })!,
   makeSurface([0, 0, -200], [0, 200, 200], [0, 200, -200], { address: 0x330 })!,
+];
+
+// A curb: a wall only 45 tall on x = 0 facing the approach. The ground step's
+// UPPER push (+60) passes over it; only the lower (30, 24) push engages.
+const curb = (): Surface[] => [
+  makeSurface([0, 0, -200], [0, 45, 200], [0, 0, 200], { address: 0x380 })!,
+  makeSurface([0, 0, -200], [0, 45, -200], [0, 45, 200], { address: 0x3b0 })!,
 ];
 
 const probe = (surfaces: Surface[], opts = {}) =>
@@ -150,6 +158,26 @@ describe("findInvisibleWalls: exposed ceilings (ceiling-edge march)", () => {
     expect(probe(surfaces).segments).toEqual([]);
   });
 
+  it("stays silent when a curb's lower push keeps Mario off a shallow leak", () => {
+    // perform_ground_quarter_step pushes (30, 24) BEFORE (60, 50): walking at
+    // the curb Mario is held 24 from it, so a ceiling leaking 20 past it is
+    // never reached. Without the lower push this flagged ~400 columns.
+    const surfaces = [...ground(), ...leakyCeiling(100, 20), ...curb()];
+    expect(probe(surfaces).segments).toEqual([]);
+  });
+
+  it("flags a leak that outruns the curb's lower push", () => {
+    // 30 > 24: the band between the push distance and the leak's edge is
+    // reachable standing ground under a too-low ceiling.
+    const surfaces = [...ground(), ...leakyCeiling(100, 30), ...curb()];
+    const segments = probe(surfaces).segments;
+    expect(segments.length).toBeGreaterThan(0);
+    for (const s of segments) {
+      expect(s.kind).toBe("exposed-ceiling");
+      for (const c of s.columns) expect(Math.abs(c.x - 30)).toBeLessThanOrEqual(2);
+    }
+  });
+
   it("flags the reachable band when the leak outruns the push radius", () => {
     // Leak 60 > radius 50: between the push distance and the ceiling edge
     // there is standable ground where the step is ceiling-blocked — a real
@@ -242,6 +270,81 @@ describe("findInvisibleWalls: exposed ceilings (ceiling-edge march)", () => {
     expect(probe([...ground(), ...dyn]).segments).toEqual([]);
     const cam = leftCeiling(100).map((s) => ({ ...s, type: 0x0072 }));
     expect(probe([...ground(), ...cam]).segments).toEqual([]);
+  });
+});
+
+describe("findInvisibleWalls under Frame's wall routine (one-sided, no over-push)", () => {
+  const frame = (surfaces: Surface[]) => probe(surfaces, { walls: "frame" }).segments;
+  const sideWall = (lo: number, hi: number): Surface[] => [
+    makeSurface([0, lo, -200], [0, hi, 200], [0, lo, 200], { address: 0x340 })!,
+    makeSurface([0, lo, -200], [0, hi, -200], [0, hi, 200], { address: 0x370 })!,
+  ];
+
+  it("still flags an uncapped exposed ceiling", () => {
+    expect(frame([...ground(), ...leftCeiling(100)]).length).toBeGreaterThan(0);
+  });
+
+  it("a front-facing wall still caps its seam", () => {
+    // One-sided walls never shove a target back out from behind, so this rests
+    // on the approach check: Mario can't stand within the push radius of a face.
+    expect(frame([...ground(), ...leftCeiling(100), ...capWall()])).toEqual([]);
+    expect(frame([...ground(), ...leftCeiling(100), ...capWall(100)])).toEqual([]);
+  });
+
+  it("a back-facing wall caps nothing — the back side doesn't exist", () => {
+    const segs = frame([...ground(), ...leftCeiling(100), ...backWall()]);
+    expect(segs.length).toBeGreaterThan(0);
+    for (const s of segs) expect([0x200, 0x230]).toContain(s.blockerAddr);
+  });
+
+  it("shallow leaks stay silent, deep leaks fire (face push and curb)", () => {
+    expect(frame([...ground(), ...leakyCeiling(100, 10), ...capWall()])).toEqual([]);
+    const deep = frame([...ground(), ...leakyCeiling(100, 60), ...capWall()]);
+    expect(deep.length).toBeGreaterThan(0);
+    for (const s of deep) for (const c of s.columns) expect(Math.abs(c.x - 60)).toBeLessThanOrEqual(2);
+    expect(frame([...ground(), ...leakyCeiling(100, 20), ...curb()])).toEqual([]);
+    expect(frame([...ground(), ...leakyCeiling(100, 30), ...curb()]).length).toBeGreaterThan(0);
+  });
+
+  it("a curb on a ledge rim stops Mario before the drop (the approach check)", () => {
+    // Ledge floor at 500 (x <= 0) with a 45-tall curb on its rim facing the
+    // ledge; below it a room (floor 0, ceiling 580) Mario would be walled out
+    // of if he could step off. He can't: the curb holds him 24 back. The
+    // blocked band starts at the room ceiling (580), ABOVE the curb, so the
+    // sealed-solid cull can't see the curb — vanilla stays silent because its
+    // two-sided push shoves the target back out; one-sided walls need the
+    // approach check (Mario can't stand inside the curb's push radius).
+    const ledge: Surface[] = [
+      makeSurface([-200, 500, -200], [-200, 500, 200], [0, 500, 200], { address: 0x400 })!,
+      makeSurface([-200, 500, -200], [0, 500, 200], [0, 500, -200], { address: 0x430 })!,
+    ];
+    const rimCurb: Surface[] = [
+      makeSurface([0, 500, -200], [0, 500, 200], [0, 545, 200], { address: 0x480 })!,
+      makeSurface([0, 500, -200], [0, 545, 200], [0, 545, -200], { address: 0x4b0 })!,
+    ];
+    const room: Surface[] = [
+      makeSurface([0, 0, -200], [0, 0, 200], [400, 0, 200], { address: 0x500 })!,
+      makeSurface([0, 0, -200], [400, 0, 200], [400, 0, -200], { address: 0x530 })!,
+      makeSurface([0, 580, -200], [400, 580, 200], [0, 580, 200], { address: 0x600 })!,
+      makeSurface([0, 580, -200], [400, 580, -200], [400, 580, 200], { address: 0x630 })!,
+    ];
+    expect(rimCurb[0].normal.x).toBeCloseTo(-1, 6); // faces the ledge
+    const scene = [...ledge, ...rimCurb, ...room];
+    expect(probe(scene).segments).toEqual([]); // vanilla
+    expect(frame(scene)).toEqual([]);
+    // Without the curb the drop IS walled (leave-ground under a too-low roof).
+    expect(frame([...ledge, ...room]).length).toBeGreaterThan(0);
+  });
+
+  it("culls a sealed solid and keeps a leak beside one", () => {
+    const roof: Surface[] = [
+      makeSurface([-200, 400, -200], [-200, 400, 200], [0, 400, 200], { address: 0xa60 })!,
+      makeSurface([-200, 400, -200], [0, 400, 200], [0, 400, -200], { address: 0xa90 })!,
+    ];
+    expect(frame([...ground(), ...leftCeiling(100), ...sideWall(100, 400), ...roof])).toEqual([]);
+    const leaked = frame([...ground(), ...leakyCeiling(100, 60), ...sideWall(100, 400)]);
+    expect(leaked.length).toBeGreaterThan(0);
+    for (const s of leaked) expect(Math.abs(s.x0 - 60)).toBeLessThanOrEqual(2);
   });
 });
 
@@ -348,6 +451,27 @@ describe("findInvisibleWalls: ledges above roofed rooms (floor-edge march)", () 
       expect(s.yHigh).toBeGreaterThan(500);
       expect([0x600, 0x630]).toContain(s.blockerAddr);
     }
+  });
+
+  it("attributes each column to the roof that actually blocks it", () => {
+    // Same ledge, but the room below has TWO roofs meeting at z = 0. One
+    // marched rim edge is blocked by both along its length; a segment must
+    // never carry one roof's address over columns the other one blocks.
+    const roofA: Surface[] = [
+      makeSurface([0, 100, -200], [400, 100, 0], [0, 100, 0], { address: 0x640 })!,
+      makeSurface([0, 100, -200], [400, 100, -200], [400, 100, 0], { address: 0x670 })!,
+    ];
+    const roofB: Surface[] = [
+      makeSurface([0, 100, 0], [400, 100, 200], [0, 100, 200], { address: 0x6a0 })!,
+      makeSurface([0, 100, 0], [400, 100, 0], [400, 100, 200], { address: 0x6d0 })!,
+    ];
+    const segments = probe([...upperFloor(), ...lowerFloor(), ...roofA, ...roofB]).segments;
+    const a = segments.filter((s) => [0x640, 0x670].includes(s.blockerAddr));
+    const b = segments.filter((s) => [0x6a0, 0x6d0].includes(s.blockerAddr));
+    expect(a.length).toBeGreaterThan(0);
+    expect(b.length).toBeGreaterThan(0);
+    for (const s of a) for (const c of s.columns) expect(c.z).toBeLessThanOrEqual(0);
+    for (const s of b) for (const c of s.columns) expect(c.z).toBeGreaterThanOrEqual(0);
   });
 
   it("stays silent when the drop is open (no roof)", () => {
@@ -497,6 +621,17 @@ describe("findInvisibleWalls: full-region vertical extents", () => {
     for (const s of segments) {
       expect(s.yLow).toBeCloseTo(0, 3);
       expect(s.yHigh).toBeCloseTo(400, 3);
+    }
+  });
+
+  it("an intangible deck above does NOT cap the region (Mario falls through it)", () => {
+    const intangibleDeck = upperDeck(400).map((s) => ({ ...s, type: SURFACE_INTANGIBLE }));
+    for (const select of ["first", "extreme"] as const) {
+      const segments = probe([...ground(), ...leftCeiling(100), ...intangibleDeck], {
+        select,
+      }).segments.filter((s) => [0x200, 0x230].includes(s.blockerAddr));
+      expect(segments.length).toBeGreaterThan(0);
+      for (const s of segments) expect(s.yHigh).toBeGreaterThan(450);
     }
   });
 

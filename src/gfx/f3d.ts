@@ -159,11 +159,14 @@ export function interpretDisplayList(
   };
 
   const emitTri = (i0: number, i1: number, i2: number): void => {
+    // All three or nothing: bailing out after pushing one or two vertices (a
+    // slot never loaded, or a garbage index that isn't a multiple of 10) would
+    // shift every later triangle in the batch by a vertex.
+    if (!vtx[i0] || !vtx[i1] || !vtx[i2]) return;
     const batch = getBatch();
     if (fog && batch.fogged) fog.used = true;
     for (const i of [i0, i1, i2]) {
       const v = vtx[i];
-      if (!v) return;
       batch.positions.push(v.x, v.y, v.z);
       if (batch.texture) {
         // s/t are 10.5 fixed texels; G_TEXTURE scale is /0x10000.

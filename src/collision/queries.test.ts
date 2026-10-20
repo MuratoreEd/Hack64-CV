@@ -5,6 +5,7 @@ import {
   findFloorFromList,
   findCeilFromList,
   findWallCollisionsFromList,
+  findWallCollisionsFromListFrame,
   type WallCollisionData,
 } from "./queries";
 import { SURFACE_CAMERA_BOUNDARY, FLOOR_LOWER_LIMIT, CELL_HEIGHT_LIMIT } from "./constants";
@@ -153,5 +154,97 @@ describe("findWallCollisionsFromList", () => {
   it("skips walls outside the lowerY/upperY band", () => {
     const d = data({ y: 5000 });
     expect(findWallCollisionsFromList([wallX0()], d)).toBe(0);
+  });
+
+  it("over-pushes through duplicated geometry (the Wall Overlaps quirk)", () => {
+    // Both copies test the ORIGINAL position (offset 30) and both push 20.
+    const d = data({ x: 30 });
+    findWallCollisionsFromList([wallX0({ address: 1 }), wallX0({ address: 2 })], d);
+    expect(d.x).toBeCloseTo(70, 5);
+  });
+});
+
+describe("findWallCollisionsFromListFrame (Frame's patch)", () => {
+  // Quad-half on the plane x=0 facing +x, spanning z ∈ [-100, 100], y ∈ [0, 200];
+  // its B→C edge is vertical at z = 100.
+  const frontWall = (address = 0): Surface =>
+    makeSurface([0, 0, -100], [0, 200, 100], [0, 0, 100], { address })!;
+  const data = (over: Partial<WallCollisionData> = {}): WallCollisionData => ({
+    x: 30, y: 40, z: 0, offsetY: 60, radius: 50, walls: [], numWalls: 0, ...over,
+  });
+
+  it("precondition: the fixture faces +x", () => {
+    expect(frontWall().normal.x).toBeCloseTo(1, 6);
+  });
+
+  it("pushes a point in front of the face out to the radius", () => {
+    const d = data();
+    expect(findWallCollisionsFromListFrame([frontWall(0x30)], d)).toBe(1);
+    expect(d.x).toBeCloseTo(50, 5);
+    expect(d.walls.map((w) => w.address)).toEqual([0x30]);
+  });
+
+  it("ignores the back side entirely (vanilla would shove the point through)", () => {
+    const d = data({ x: -30 });
+    expect(findWallCollisionsFromListFrame([frontWall()], d)).toBe(0);
+    expect(d.x).toBe(-30);
+    expect(d.numWalls).toBe(0);
+    // Same point, vanilla: pushed forward through the plane to +50.
+    const v = data({ x: -30 });
+    findWallCollisionsFromList([frontWall()], v);
+    expect(v.x).toBeCloseTo(50, 5);
+  });
+
+  it("accumulates pushes: duplicated geometry no longer over-pushes", () => {
+    const d = data({ x: 30 });
+    findWallCollisionsFromListFrame([frontWall(1), frontWall(2)], d);
+    // The first copy pushes to 50; the second sees offset 50 = radius → +0.
+    expect(d.x).toBeCloseTo(50, 5);
+    expect(d.numWalls).toBe(2);
+  });
+
+  it("pushes radially off a vertical edge, recording only a push along the normal", () => {
+    // Beside the wall's end (z > 100) at test height 100: nearest edge point is
+    // (0, 100) on the vertical B→C edge. Margin = radius - 1 = 49.
+    const d = data({ x: 5, z: 105 });
+    expect(findWallCollisionsFromListFrame([frontWall(0x40)], d)).toBe(1);
+    expect(Math.hypot(d.x - 0, d.z - 100)).toBeCloseTo(49, 4);
+    expect(d.x).toBeCloseTo(34.648, 2);
+    // Pushed diagonally (45° off the normal): not "touching" the wall.
+    expect(d.numWalls).toBe(0);
+
+    // Almost straight in front of the edge: the push runs along the normal.
+    const e = data({ x: 5, z: 100.5 });
+    findWallCollisionsFromListFrame([frontWall(0x40)], e);
+    expect(Math.hypot(e.x, e.z - 100)).toBeCloseTo(49, 4);
+    expect(e.walls.map((w) => w.address)).toEqual([0x40]);
+  });
+
+  it("takes the edge margin from the radius BEFORE the 200 clamp", () => {
+    // Radius 250: face pushes clamp to 200, edges keep 250 - 1 = 249.
+    const d = data({ x: 150, z: 250, radius: 250 });
+    findWallCollisionsFromListFrame([frontWall()], d);
+    expect(Math.hypot(d.x, d.z - 100)).toBeCloseTo(249, 3);
+  });
+
+  it("scales the edge margin (extended-boundary ROMs pass 1/scale)", () => {
+    const d = data({ x: 1, z: 100.1, radius: 12.5 });
+    findWallCollisionsFromListFrame([frontWall()], d, 0.25);
+    expect(Math.hypot(d.x, d.z - 100)).toBeCloseTo(12.25, 4);
+  });
+
+  it("stays finite on integer columns around integer vertices", () => {
+    // The probe tests integer columns against integer vertices — exactly the
+    // inputs that sit on edges and vertices. (A point exactly on an edge is
+    // caught by the face test first; the 0/0 guard in edgePush only matters
+    // when rounding makes the face test miss it.)
+    const walls = [frontWall(1), makeSurface([0, 0, 100], [0, 200, 100], [40, 0, 140])!];
+    for (let x = -3; x <= 60; x++) {
+      for (let z = 90; z <= 150; z++) {
+        const d = data({ x, z, y: 40 });
+        findWallCollisionsFromListFrame(walls, d);
+        expect(Number.isFinite(d.x) && Number.isFinite(d.z)).toBe(true);
+      }
+    }
   });
 });

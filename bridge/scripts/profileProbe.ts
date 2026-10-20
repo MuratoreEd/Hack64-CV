@@ -21,6 +21,7 @@ function main(): void {
   if (!rd) throw new Error("RDRAM not found");
   const pool = readSurfacePool(rd);
   proc.close();
+  if (!pool) throw new Error("no valid surface pool (enter a level first)");
 
   const surfaces = parseSurfacePool(
     pool.bytes.buffer.slice(

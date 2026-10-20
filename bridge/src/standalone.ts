@@ -21,6 +21,7 @@ import {
   readSurfacePool,
   readRdramSnapshot,
   type Rdram,
+  type SurfacePool,
 } from "./rdram.js";
 import type {
   ServerMessage,
@@ -56,7 +57,9 @@ const MIME: Record<string, string> = {
 let attached: { proc: ProcessMemory; rd: Rdram } | null = null;
 let nextAttachTry = 0;
 let lastWaitLog = 0;
-let lastPool: Buffer | null = null;
+// The last good surface pool: what change detection compares against, and what
+// a viewer connecting mid-load (when the live pool isn't readable) receives.
+let lastPool: SurfacePool | null = null;
 
 /** Try to attach to a running Project64. Throttled: RDRAM discovery scans the
  * whole process, so failed attempts only happen every ATTACH_RETRY_MS. */
@@ -102,8 +105,7 @@ function detach(reason: string): void {
 
 // --- Bridge messages (same wire protocol as the dev bridge) ---
 
-function buildSurfacesMessage(rd: Rdram): SurfacesMessage {
-  const pool = readSurfacePool(rd);
+function surfacesMessage(pool: SurfacePool): SurfacesMessage {
   return {
     type: "surfaces",
     count: pool.count,
@@ -125,10 +127,13 @@ function serveStatic(req: http.IncomingMessage, res: http.ServerResponse): void 
     res.end(HEALTH_BODY);
     return;
   }
-  // Normalize and refuse anything that escapes the dist directory.
+  // Normalize and refuse anything that escapes the dist directory. (A bare
+  // prefix test would also admit a sibling such as "dist-old/".)
   const rel = url === "/" ? "index.html" : url.replace(/^\/+/, "");
   const file = path.normalize(path.join(distDir, rel));
-  if (!file.startsWith(distDir)) {
+  const inside = path.relative(distDir, file);
+  const escapes = inside === ".." || inside.startsWith(`..${path.sep}`);
+  if (inside === "" || escapes || path.isAbsolute(inside)) {
     res.writeHead(403).end();
     return;
   }
@@ -200,7 +205,8 @@ async function main(): Promise<void> {
     console.log("viewer connected");
     if (attached) {
       try {
-        send(ws, buildSurfacesMessage(attached.rd));
+        const pool = readSurfacePool(attached.rd) ?? lastPool;
+        if (pool) send(ws, surfacesMessage(pool));
         send(ws, { type: "state", ...readState(attached.rd) });
       } catch (err) {
         detach((err as Error).message);
@@ -215,7 +221,10 @@ async function main(): Promise<void> {
       }
       if (!attached) return; // viewer will get data once PJ64 is back
       try {
-        if (msg.type === "refresh") send(ws, buildSurfacesMessage(attached.rd));
+        if (msg.type === "refresh") {
+          const pool = readSurfacePool(attached.rd) ?? lastPool;
+          if (pool) send(ws, surfacesMessage(pool));
+        }
         if (msg.type === "rdram") {
           const snap = readRdramSnapshot(attached.rd);
           send(ws, {
@@ -235,21 +244,26 @@ async function main(): Promise<void> {
   // bytes change (dynamic surfaces rewrite in place), self-heal on read errors.
   setInterval(() => {
     if (!ensureAttached() || !attached) return;
-    let surfacesMsg: SurfacesMessage;
+    let pool: SurfacePool | null;
     let stateMsg: ServerMessage;
     try {
-      surfacesMsg = buildSurfacesMessage(attached.rd);
+      pool = readSurfacePool(attached.rd);
       stateMsg = { type: "state", ...readState(attached.rd) };
     } catch (err) {
+      // A failed READ means the emulator (or its RDRAM mapping) is gone. An
+      // unreadable pool mid-load is not an error: readSurfacePool says null.
       detach((err as Error).message);
       return;
     }
-    const poolBytes = Buffer.from(surfacesMsg.base64, "base64");
-    const changed = lastPool === null || !lastPool.equals(poolBytes);
-    lastPool = poolBytes;
+    const changed = pool !== null && (lastPool === null || !lastPool.bytes.equals(pool.bytes));
+    if (changed) lastPool = pool;
+    // Serialize once, not once per viewer.
+    const surfacesJson = changed && pool ? JSON.stringify(surfacesMessage(pool)) : null;
+    const stateJson = JSON.stringify(stateMsg);
     for (const ws of wss.clients) {
-      if (changed) send(ws, surfacesMsg);
-      send(ws, stateMsg);
+      if (ws.readyState !== WebSocket.OPEN) continue;
+      if (surfacesJson) ws.send(surfacesJson);
+      ws.send(stateJson);
     }
   }, STATE_INTERVAL_MS);
 

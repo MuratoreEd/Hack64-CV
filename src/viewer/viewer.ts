@@ -4,6 +4,7 @@
 import * as THREE from "three";
 import type { Surface, LevelBounds } from "../collision/surface";
 import { SurfaceKind, deriveLevelBounds } from "../collision/surface";
+import { SURFACE_FLAG_DYNAMIC } from "../collision/constants";
 import { buildCollisionMesh } from "./collisionMesh";
 import type { CollisionMeshView } from "./collisionMesh";
 import type {
@@ -20,6 +21,17 @@ const EMPTY_COUNTS = (): Record<SurfaceKind, number> => ({
   [SurfaceKind.Wall]: 0,
   [SurfaceKind.Ceiling]: 0,
 });
+
+/** One rendered anomaly box: a run of adjacent blocked unit columns sharing a
+ * blocked interval (collision units, inclusive integer cell ranges). */
+export interface AnomalyBox {
+  cellX0: number;
+  cellX1: number;
+  cellZ0: number;
+  cellZ1: number;
+  yLow: number;
+  yHigh: number;
+}
 
 export interface ViewerOptions {
   zFlip?: boolean;
@@ -48,7 +60,21 @@ export class Viewer {
   private yaw = 0;
   private pitch = 0;
   private lastPointer: { x: number; y: number } | null = null;
-  private meshView: CollisionMeshView | null = null;
+  // The collision mesh in two parts: level geometry (rebuilt only when the
+  // static pool changes) and object surfaces (rebuilt on every pool update —
+  // the bridge re-streams whenever a platform moves, and rebuilding 12k level
+  // triangles plus their wireframe 10×/s for that was pure waste).
+  private staticView: CollisionMeshView | null = null;
+  private staticKey: string | null = null;
+  private dynamicView: CollisionMeshView | null = null;
+  // Per-kind visibility is the viewer's state, not a mesh's: freshly built
+  // meshes inherit it (they used to come back all-visible on every pool
+  // refresh while the HUD checkbox still said hidden).
+  private kindVisible: Record<SurfaceKind, boolean> = {
+    [SurfaceKind.Floor]: true,
+    [SurfaceKind.Wall]: true,
+    [SurfaceKind.Ceiling]: true,
+  };
   private marioMarker: THREE.Sprite | null = null;
   private zFlip: boolean;
   // Camera framing is explicit: the last derived bounds are kept so main.ts
@@ -89,6 +115,9 @@ export class Viewer {
   private anomalyGroup = new THREE.Group();
   private anomalyMeshes = new Map<InvisibleWallKind, THREE.Mesh>();
   private anomalySegsByKind = new Map<InvisibleWallKind, InvisibleWallSegment[]>();
+  // Parallel to anomalySegsByKind: the cells + interval each box covers, so a
+  // pick can report the clicked column's own numbers, not a segment's union.
+  private anomalyBoxesByKind = new Map<InvisibleWallKind, AnomalyBox[]>();
   private anomalyKindVisible = new Map<InvisibleWallKind, boolean>();
   // User-chosen overlay color per kind (HUD color pickers), overriding the
   // palette default; persists across anomaly rebuilds.
@@ -97,7 +126,9 @@ export class Viewer {
   private raycaster = new THREE.Raycaster();
   private pointerDown: { x: number; y: number } | null = null;
   /** Called on a click that hits (or misses) an anomaly quad. */
-  onAnomalyPick: ((seg: InvisibleWallSegment | null) => void) | null = null;
+  onAnomalyPick:
+    | ((seg: InvisibleWallSegment | null, box: AnomalyBox | null) => void)
+    | null = null;
 
   constructor(
     private container: HTMLElement,
@@ -177,27 +208,48 @@ export class Viewer {
     requestAnimationFrame(this.animate);
   }
 
-  setSurfaces(surfaces: Surface[]): void {
-    if (this.meshView) {
-      this.scene.remove(this.meshView.group);
-      this.meshView.dispose();
-      this.meshView = null;
+  /** Show a surface pool. `staticKey` (staticFingerprint of the pool) lets
+   * the level-geometry mesh survive updates that only moved objects; without
+   * it everything is rebuilt. */
+  setSurfaces(surfaces: Surface[], staticKey?: string): void {
+    const isDynamic = (s: Surface) => (s.flags & SURFACE_FLAG_DYNAMIC) !== 0;
+    const staticChanged = staticKey === undefined || staticKey !== this.staticKey;
+    if (staticChanged) {
+      const statics = surfaces.filter((s) => !isDynamic(s));
+      this.replaceView("static", buildCollisionMesh(statics, { zFlip: this.zFlip }));
+      this.staticKey = staticKey ?? null;
+      // Objects can sit far outside the level (parked at the origin, say), so
+      // bounds come from level geometry when there is any.
+      const bounds = deriveLevelBounds(statics.length > 0 ? statics : surfaces);
+      this.rebuildHelpers(bounds);
+      this.lastBounds = bounds;
+      // Frame only the very first scene (the offline demo). After that the
+      // camera is the user's; main.ts calls reframe() on a real level change.
+      if (!this.framedOnce && Number.isFinite(bounds.minX)) {
+        this.framedOnce = true;
+        this.frame(bounds);
+      }
     }
-    this.meshView = buildCollisionMesh(surfaces, { zFlip: this.zFlip });
-    this.scene.add(this.meshView.group);
+    this.replaceView(
+      "dynamic",
+      buildCollisionMesh(surfaces.filter(isDynamic), { zFlip: this.zFlip }),
+    );
     this.applyViewMode();
+  }
 
-    const bounds = deriveLevelBounds(surfaces);
-    this.rebuildHelpers(bounds);
-    // Frame only the very first scene (the offline demo). After that the
-    // camera is the user's: surfaces re-stream mid-level whenever the pool
-    // changes, and snapping the view on every refresh was a bug. main.ts
-    // calls reframe() when the level/area genuinely changes.
-    this.lastBounds = bounds;
-    if (!this.framedOnce && Number.isFinite(bounds.minX)) {
-      this.framedOnce = true;
-      this.frame(bounds);
+  private replaceView(which: "static" | "dynamic", view: CollisionMeshView): void {
+    const old = which === "static" ? this.staticView : this.dynamicView;
+    if (old) {
+      this.scene.remove(old.group);
+      old.dispose();
     }
+    for (const k of Object.keys(this.kindVisible) as SurfaceKind[]) {
+      view.setKindVisible(k, this.kindVisible[k]);
+    }
+    this.scene.add(view.group);
+    if (which === "static") this.staticView = view;
+    else this.dynamicView = view;
+    this.needsRender = true;
   }
 
   /** Re-frame the camera on the current level's bounds. frame() is a pure
@@ -208,11 +260,18 @@ export class Viewer {
   }
 
   get counts(): Record<SurfaceKind, number> {
-    return this.meshView ? this.meshView.counts : EMPTY_COUNTS();
+    const out = EMPTY_COUNTS();
+    for (const v of [this.staticView, this.dynamicView]) {
+      if (!v) continue;
+      for (const k of Object.keys(out) as SurfaceKind[]) out[k] += v.counts[k];
+    }
+    return out;
   }
 
   setKindVisible(kind: SurfaceKind, visible: boolean): void {
-    this.meshView?.setKindVisible(kind, visible);
+    this.kindVisible[kind] = visible;
+    this.staticView?.setKindVisible(kind, visible);
+    this.dynamicView?.setKindVisible(kind, visible);
     this.needsRender = true;
   }
 
@@ -353,9 +412,13 @@ export class Viewer {
       skyMat({ map, side: THREE.BackSide }),
     );
     const cap = (y: number, color: [number, number, number]): THREE.Mesh => {
+      // The averages are sRGB, like the panorama they came from: say so, or
+      // Color() takes them as linear and the caps come out washed-out next to
+      // the band's edge rows.
+      const c = new THREE.Color().setRGB(color[0], color[1], color[2], THREE.SRGBColorSpace);
       const m = new THREE.Mesh(
         new THREE.CircleGeometry(R, 48),
-        skyMat({ color: new THREE.Color(...color), side: THREE.DoubleSide }),
+        skyMat({ color: c, side: THREE.DoubleSide }),
       );
       m.rotation.x = Math.PI / 2;
       m.position.y = y;
@@ -394,7 +457,8 @@ export class Viewer {
   private applyViewMode(): void {
     const textured = this.texturedVisible && this.modelGroup !== null;
     if (this.modelGroup) this.modelGroup.visible = textured;
-    if (this.meshView) this.meshView.group.visible = !textured;
+    if (this.staticView) this.staticView.group.visible = !textured;
+    if (this.dynamicView) this.dynamicView.group.visible = !textured;
     this.needsRender = true;
   }
 
@@ -405,7 +469,15 @@ export class Viewer {
       new THREE.Float32BufferAttribute(batch.positions, 3),
     );
     geo.setAttribute("uv", new THREE.Float32BufferAttribute(batch.uvs, 2));
-    geo.setAttribute("color", new THREE.Float32BufferAttribute(batch.colors, 4));
+    // The RDP multiplies texel × shade in display (sRGB) space. Three decodes
+    // the sRGB texture to linear but takes vertex colors AS linear, so raw
+    // shades rendered shadows far too bright (0.5 came out ≈0.73). Decoding the
+    // shade too makes linear(tex)·linear(shade) encode back to ≈ tex·shade.
+    const colors = new Float32Array(batch.colors.length);
+    for (let i = 0; i < colors.length; i++) {
+      colors[i] = i % 4 === 3 ? batch.colors[i] : srgbToLinear(batch.colors[i]);
+    }
+    geo.setAttribute("color", new THREE.BufferAttribute(colors, 4));
 
     const wrap = (m: WrapMode): THREE.Wrapping =>
       m === "repeat"
@@ -482,7 +554,7 @@ export class Viewer {
    * segment's XZ bounding box for hand-built columnless segments. Returns a
    * flat position array, 108 floats per box — callers recover the box count
    * from `length / 108` to map picks back to owning segments. */
-  private segmentBoxes(s: InvisibleWallSegment): number[] {
+  private segmentBoxes(s: InvisibleWallSegment, boxes?: AnomalyBox[]): number[] {
     const zs = this.zFlip ? -1 : 1;
     const out: number[] = [];
     if (s.columns.length === 0) {
@@ -492,6 +564,11 @@ export class Viewer {
         s.yLow, s.yHigh,
         (Math.min(s.z0, s.z1) - 0.5) * zs, (Math.max(s.z0, s.z1) + 0.5) * zs,
       );
+      boxes?.push({
+        cellX0: Math.round(Math.min(s.x0, s.x1)), cellX1: Math.round(Math.max(s.x0, s.x1)),
+        cellZ0: Math.round(Math.min(s.z0, s.z1)), cellZ1: Math.round(Math.max(s.z0, s.z1)),
+        yLow: s.yLow, yHigh: s.yHigh,
+      });
       return out;
     }
     // Row pass: bucket columns by (z, blocked interval), fuse consecutive x.
@@ -529,13 +606,15 @@ export class Viewer {
       zList.sort((a, b) => a - b);
       let z0 = zList[0];
       let z1 = zList[0];
-      const emit = () =>
+      const emit = () => {
         Viewer.pushBox(
           out,
           x0 - 0.5, x1 + 0.5,
           yLow, yHigh,
           (z0 - 0.5) * zs, (z1 + 0.5) * zs,
         );
+        boxes?.push({ cellX0: x0, cellX1: x1, cellZ0: z0, cellZ1: z1, yLow, yHigh });
+      };
       for (let i = 1; i < zList.length; i++) {
         if (zList[i] === z1 + 1) z1 = zList[i];
         else if (zList[i] !== z1) {
@@ -561,6 +640,7 @@ export class Viewer {
     }
     this.anomalyMeshes.clear();
     this.anomalySegsByKind.clear();
+    this.anomalyBoxesByKind.clear();
     this.highlightSegment(null);
     this.needsRender = true;
     if (segments.length === 0) return;
@@ -577,9 +657,10 @@ export class Viewer {
       // map straight back to it — a segment now contributes many boxes.
       const chunks: number[][] = [];
       const boxSegs: InvisibleWallSegment[] = [];
+      const boxes: AnomalyBox[] = [];
       let total = 0;
       for (const s of segs) {
-        const q = this.segmentBoxes(s);
+        const q = this.segmentBoxes(s, boxes);
         chunks.push(q);
         total += q.length;
         for (let i = 0; i < q.length / 108; i++) boxSegs.push(s);
@@ -601,6 +682,7 @@ export class Viewer {
       mesh.visible = this.anomalyKindVisible.get(kind) ?? true;
       this.anomalyMeshes.set(kind, mesh);
       this.anomalySegsByKind.set(kind, boxSegs);
+      this.anomalyBoxesByKind.set(kind, boxes);
       this.anomalyGroup.add(mesh);
     }
   }
@@ -641,7 +723,7 @@ export class Viewer {
     const faceIndex = hit?.faceIndex;
     if (faceIndex == null) {
       this.highlightSegment(null);
-      this.onAnomalyPick(null);
+      this.onAnomalyPick(null, null);
       return;
     }
     // Twelve triangles per box; anomalySegsByKind has one entry per box (in
@@ -649,9 +731,11 @@ export class Viewer {
     let kind: InvisibleWallKind | null = null;
     for (const [k, m] of this.anomalyMeshes) if (m === hit.object) kind = k;
     if (!kind) return;
-    const seg = this.anomalySegsByKind.get(kind)?.[Math.floor(faceIndex / 12)];
+    const boxIndex = Math.floor(faceIndex / 12);
+    const seg = this.anomalySegsByKind.get(kind)?.[boxIndex];
+    const box = this.anomalyBoxesByKind.get(kind)?.[boxIndex];
     this.highlightSegment(seg ?? null);
-    this.onAnomalyPick(seg ?? null);
+    this.onAnomalyPick(seg ?? null, box ?? null);
   }
 
   private highlightSegment(seg: InvisibleWallSegment | null): void {
@@ -725,6 +809,13 @@ export class Viewer {
   }
 
   private rebuildHelpers(b: LevelBounds): void {
+    // Dispose before dropping: once rendered, the renderer keeps a helper's GPU
+    // buffers until dispose() — clearing alone leaked them on every rebuild.
+    for (const child of this.helpers.children) {
+      const line = child as THREE.LineSegments;
+      line.geometry.dispose();
+      (line.material as THREE.Material).dispose();
+    }
     this.helpers.clear();
     if (!Number.isFinite(b.minX)) return;
     const zs = this.zFlip ? -1 : 1;
@@ -755,10 +846,15 @@ export class Viewer {
       b.maxZ - b.minZ,
       1000,
     );
-    // Half the wider horizontal span must fit in half the vertical FOV.
-    const span = Math.max(b.maxX - b.minX, b.maxZ - b.minZ, 1000);
-    const halfFov = THREE.MathUtils.degToRad(this.camera.fov / 2);
-    const lift = (span / 2) / Math.tan(halfFov);
+    // The camera sits over the ORIGIN, so it must see out to the level's
+    // furthest extent from it (a level built off-center used to be cropped),
+    // within the narrower of the two FOVs (portrait windows too).
+    const half = Math.max(
+      Math.abs(b.minX), Math.abs(b.maxX), Math.abs(b.minZ), Math.abs(b.maxZ), 500,
+    );
+    const halfFovV = THREE.MathUtils.degToRad(this.camera.fov / 2);
+    const halfFovH = Math.atan(Math.tan(halfFovV) * this.camera.aspect);
+    const lift = half / Math.tan(Math.min(halfFovV, halfFovH));
     this.camera.position.set(0, b.maxY + lift, 0);
     this.camera.near = Math.max(1, size / 2000);
     this.camera.far = size * 20;
@@ -862,3 +958,8 @@ export class Viewer {
 const FLY_KEYS = new Set([
   "KeyW", "KeyA", "KeyS", "KeyD", "KeyC", "Space", "ShiftLeft",
 ]);
+
+/** sRGB transfer function, decoding a 0..1 display value to linear. */
+function srgbToLinear(c: number): number {
+  return c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+}

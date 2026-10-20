@@ -61,13 +61,18 @@ export class LiveClient {
     this.handlers.onStatus("connecting…", false);
     const ws = new WebSocket(this.url);
     this.ws = ws;
+    // A failed connection fires error THEN close; keep the error's message
+    // instead of letting close replace it with a bare "disconnected".
+    let failed = false;
     ws.onopen = () => this.handlers.onStatus("connected", true);
     ws.onclose = () => {
-      this.handlers.onStatus("disconnected", false);
+      if (!failed) this.handlers.onStatus("disconnected", false);
       this.ws = null;
     };
-    ws.onerror = () =>
+    ws.onerror = () => {
+      failed = true;
       this.handlers.onStatus("error — is the bridge running?", false);
+    };
     ws.onmessage = (ev) => this.onMessage(ev.data as string);
   }
 
