@@ -1,8 +1,7 @@
 # Runs the packaged viewer (dist-exe\InvisibleWallViewer.exe) for testing.
 # If any code the exe is built from changed since the last build, the exe is
 # rebuilt first (seconds to a minute), so this always runs the current code. Then it
-# starts the exe, which opens the viewer in your browser with the ground-truth
-# capture panel enabled.
+# starts the exe, which opens the viewer in your browser.
 #
 #   run-exe.cmd                      double-click (or the desktop shortcut)
 #   .\run-exe.ps1 -Rebuild           rebuild even if nothing changed
@@ -87,7 +86,7 @@ foreach ($procId in $owners) {
   }
 }
 
-$exeArgs = @("--port=$Port", '--capture')
+$exeArgs = @("--port=$Port")
 if ($NoOpen) { $exeArgs += '--no-open' }
 Write-Host "Starting $exe"
 Start-Process -FilePath $exe -ArgumentList $exeArgs -WorkingDirectory (Split-Path $exe)

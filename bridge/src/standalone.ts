@@ -3,8 +3,7 @@
 //   2. runs the WebSocket bridge on the SAME port,
 //   3. waits for Project64 instead of crashing when it isn't up yet, and
 //      re-attaches automatically when the emulator is closed and reopened,
-//   4. opens the viewer in the default browser (unless --no-open; --capture
-//      opens it with the ground-truth capture panel enabled),
+//   4. opens the viewer in the default browser (unless --no-open),
 //   5. if another instance is already serving, just opens the browser.
 //
 // Dev never uses this file (start.cmd runs index.ts + Vite); it exists for
@@ -190,9 +189,7 @@ async function main(): Promise<void> {
   const noOpen = args.includes("--no-open");
   const portArg = args.find((a) => a.startsWith("--port="));
   const port = portArg ? Number.parseInt(portArg.slice(7), 10) : DEFAULT_PORT;
-  // The page itself enables the labelling panel from ?capture=1; the flag just
-  // opens it that way (run-exe.cmd, the testing launcher, passes it).
-  const url = `http://localhost:${port}${args.includes("--capture") ? "/?capture=1" : ""}`;
+  const url = `http://localhost:${port}`;
 
   console.log(`SM64 Invisible Wall Viewer v${VERSION}`);
   console.log("----------------------------------------");

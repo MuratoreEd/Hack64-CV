@@ -31,6 +31,10 @@ every wall reproduces on its own and gets drawn exactly where the game would sto
   (toggleable, off by default).
 - **Free-fly camera** with an adjustable speed, per-cause color pickers, and toggles
   for every layer.
+- **Ground truth reports** — when the viewer is wrong (a wall it missed, or one
+  that isn't there), park Mario on the spot, describe it, and save it: the file
+  carries the level's exact collision data, so the case can be replayed and
+  fixed (see [`corpus/README.md`](corpus/README.md)).
 
 ## Quick start (no install)
 
@@ -87,8 +91,8 @@ bridge and relaunches everything.
 Double-click **`run-exe.cmd`** — or the desktop shortcut that `npm run shortcut`
 creates. It rebuilds `dist-exe\InvisibleWallViewer.exe` first if any of the code
 it's built from changed since the last build, stops an older copy that's still
-running (and the dev bridge, which needs the same port), then starts the exe
-with the ground-truth capture panel enabled. Options, from a terminal:
+running (and the dev bridge, which needs the same port), then starts the exe.
+Options, from a terminal:
 `.\run-exe.ps1 -Rebuild` forces a rebuild, `-NoOpen` skips opening the browser,
 `-Port 8082` serves somewhere else.
 

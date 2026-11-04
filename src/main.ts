@@ -37,15 +37,13 @@ if (!app) throw new Error("#app container not found");
 const viewer = new Viewer(app);
 viewer.setSurfaces(demoScene());
 
-// Ground-truth capture is a labelling tool, not a viewer feature: on in dev,
-// and available from the packaged exe with ?capture=1 for a labelling session
-// run against the real build.
-const captureEnabled =
-  import.meta.env.DEV || new URLSearchParams(location.search).has("capture");
-
+// The packaged exe carries every development tool too: while the project is in
+// development, the exe is how it actually gets used. That's the ground-truth
+// capture panel (flag a spot as a false positive/negative, with a note) and
+// the window.__ivw console hook below. A public release decides what stays.
 const hud = createHud(app, viewer, {
   onConnect: () => client.connect(),
-  onCaptureLabel: captureEnabled ? captureLabel : undefined,
+  onCaptureLabel: captureLabel,
 });
 hud.setCounts(viewer.counts);
 
@@ -402,11 +400,12 @@ async function captureLabel(
   return `saved ${captureFilename(capture)}`;
 }
 
-// Dev-only inspection hook so the live partition/surfaces/state (and the
-// viewer/hud, for driving the anomaly overlay by hand) can be poked at from the
-// console (or the preview tools) while validating the oracle and probe.
+// Inspection hook so the live partition/surfaces/state (and the viewer/hud, for
+// driving the anomaly overlay by hand) can be poked at from the console (or the
+// preview tools) while validating the oracle and probe — in the exe as well, so
+// a report can be investigated on the build that produced it.
 const debug: Record<string, unknown> = { viewer, hud, captureLabel };
-if (import.meta.env.DEV) (window as unknown as { __ivw: unknown }).__ivw = debug;
+(window as unknown as { __ivw: unknown }).__ivw = debug;
 
 // Dev: Vite serves the page on 5173 and the bridge listens on its own port.
 // Packaged exe: one server does both, so the bridge is wherever the page
@@ -433,9 +432,9 @@ const client = new LiveClient(bridgeUrl, {
     runProbe(); // no-op unless the level geometry (or scale/profile) changed
   },
   onRdram: (bytes) => {
-    // Dev hook: lets DL-level issues be probed in-page (don't retain the
-    // 8 MB snapshot in prod, where __ivw isn't exposed anyway).
-    if (import.meta.env.DEV) debug.rdram = bytes;
+    // For __ivw: lets DL-level issues be probed in-page (one 8 MB snapshot,
+    // replaced by the next).
+    debug.rdram = bytes;
 
     // Identify the collision engine from THIS snapshot — its code, and the
     // pool it contains (never the last streamed pool, which may still be the
@@ -486,7 +485,7 @@ const client = new LiveClient(bridgeUrl, {
   },
   onState: (state) => {
     lastState = state;
-    hud.setCaptureReady(captureEnabled && client.rawPool !== null);
+    hud.setCaptureReady(client.rawPool !== null);
 
     const nextLevel = `${state.level}:${state.area}`;
     if (nextLevel !== levelKey) {

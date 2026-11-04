@@ -109,10 +109,17 @@ export function createHud(
 
   const title = document.createElement("h1");
   title.textContent = "Invisible Wall Viewer";
-  // Version in the UI so a bug report says which build it came from.
+  // Version in the UI so a bug report says which build it came from. The
+  // version only moves at a release while the exe is rebuilt far more often,
+  // so the commit it was built from goes next to it (see vite.config.ts).
   const version = document.createElement("span");
   version.className = "version";
-  version.textContent = `v${APP_VERSION}`;
+  version.textContent = `v${APP_VERSION} · ${__BUILD_ID__}`;
+  version.title =
+    __BUILD_ID__ === "dev"
+      ? "Running from source (start.cmd): always the current code"
+      : `Built ${new Date(__BUILD_TIME__).toLocaleString()} from commit ` +
+        `${__BUILD_ID__.replace(/\+$/, " plus uncommitted changes")}`;
   title.appendChild(version);
   hud.appendChild(title);
 
@@ -323,9 +330,9 @@ export function createHud(
   hud.appendChild(inspector);
 
   // Ground-truth capture (corpus labelling). Only built when a capture handler
-  // is supplied — the dev page, or the exe launched with ?capture=1. Saves what
-  // the user knows about the spot Mario is standing on, with the surface pool
-  // that produced it, so the claim can be replayed offline forever.
+  // is supplied (main.ts always supplies one, in the exe too). Saves what the
+  // user knows about the spot Mario is standing on, with the surface pool that
+  // produced it, so the claim can be replayed offline forever.
   const capture = document.createElement("div");
   capture.className = "capture";
   capture.style.display = "none";

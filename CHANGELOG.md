@@ -43,8 +43,10 @@ Versions follow [semver](https://semver.org/). The version lives in
 - Version shown in the HUD and in both bridge banners.
 - `run-exe.cmd`, and a desktop shortcut to it (`npm run shortcut`): one click
   rebuilds the exe if its code changed, makes room on the port (an older copy,
-  or the dev bridge), and starts it. The exe's new `--capture` flag opens the
-  viewer with the ground-truth capture panel.
+  or the dev bridge), and starts it.
+- The HUD shows which commit a build came from next to the version
+  (`v1.2.0 · abc1234`; `+` = built with uncommitted changes, `dev` = running
+  from source), so an out-of-date exe can be recognised.
 
 ### Fixed
 
@@ -88,6 +90,9 @@ Versions follow [semver](https://semver.org/). The version lives in
 
 ### Changed
 
+- The packaged exe now carries the development tools: the **Ground truth**
+  panel (flag a false positive or negative, with a note), which used to exist
+  only when running from source, and the `window.__ivw` console hook.
 - The world scale is tracked per level: a new level waits (up to 4 s) for a
   measurement before probing, and the HUD says "not yet measured here" when it
   has to fall back to the previous level's value.

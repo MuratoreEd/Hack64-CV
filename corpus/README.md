@@ -28,9 +28,8 @@ labels would otherwise store it twenty times.
 
 ## Capturing labels (needs a live Project64)
 
-1. Run the viewer from source (`start.cmd`), or the exe with `?capture=1`
-   appended to its URL. A **Ground truth** panel appears in the HUD once the
-   bridge is streaming.
+1. Run the viewer: the exe, or from source (`start.cmd`). A **Ground truth**
+   panel appears in the HUD once the bridge is streaming.
 2. Wait until the HUD names the collision engine ("Frame's patch detected" or
    "collision: vanilla"). A label taken before that records an unproven engine
    and the runner will reject it.

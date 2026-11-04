@@ -237,7 +237,7 @@ canvas {
   white-space: pre-line;
 }
 
-/* Ground-truth capture panel (corpus labelling; dev page or ?capture=1). */
+/* Ground-truth capture panel (corpus labelling). */
 .hud .capture {
   margin: 10px 0 2px;
   padding: 7px 10px;
