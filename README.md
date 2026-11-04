@@ -1,5 +1,3 @@
-Human note: I vibecoded the buns outta this.
-
 # SM64 Invisible Wall Viewer
 
 An interactive 3D viewer that finds the **invisible walls** in Super Mario 64 ROM
