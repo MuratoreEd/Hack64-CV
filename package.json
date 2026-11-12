@@ -7,8 +7,9 @@
   "description": "Interactive viewer that surfaces SM64 ROM hack invisible walls by faithfully reimplementing the game's collision engine and probing live emulator RAM.",
   "scripts": {
     "dev": "vite",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p bridge",
     "build": "tsc --noEmit && vite build",
-    "build:exe": "npm run build && node scripts/buildExe.mjs",
+    "build:exe": "npm run typecheck && vite build && node scripts/buildExe.mjs",
     "exe": "powershell -NoProfile -ExecutionPolicy Bypass -File run-exe.ps1",
     "shortcut": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/makeShortcut.ps1",
     "preview": "vite preview",

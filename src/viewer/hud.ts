@@ -67,7 +67,9 @@ export interface HudCallbacks {
 }
 
 export interface Hud {
-  setStatus(text: string, connected: boolean): void;
+  /** `active`: connected, connecting or retrying — the button then offers to
+   * stop instead of to connect. */
+  setStatus(text: string, connected: boolean, active?: boolean): void;
   setCounts(counts: Record<SurfaceKind, number>): void;
   setContext(
     level: number,
@@ -377,10 +379,10 @@ export function createHud(
     };
     captureWall.addEventListener("click", () => save("wall"));
     captureClear.addEventListener("click", () => save("clear"));
-    // Typing a note must not fly the camera through the level.
-    for (const ev of ["keydown", "keyup"] as const) {
-      captureNote.addEventListener(ev, (e) => e.stopPropagation());
-    }
+    // Typing a note must not fly the camera through the level. Only the
+    // PRESS is kept from the viewer: it has to see every release, or a key
+    // held while clicking into this field stays down forever.
+    captureNote.addEventListener("keydown", (e) => e.stopPropagation());
   }
 
   // Fly-speed slider: log₂ scale so slow (⅛×) and fast (8×) get equal travel.
@@ -417,9 +419,11 @@ export function createHud(
   container.appendChild(hud);
 
   return {
-    setStatus(text, connected) {
+    setStatus(text, connected, active = connected) {
       status.textContent = text;
       status.className = "status" + (connected ? " connected" : "");
+      connectBtn.textContent = active ? "Disconnect" : "Connect to Project64";
+      connectBtn.classList.toggle("secondary", active);
     },
     setCounts(counts) {
       for (const kind of ORDER) countEls[kind].textContent = String(counts[kind]);
@@ -486,11 +490,14 @@ export function createHud(
         kindCountEls[k].textContent = String(counts[k]);
         kindLabels[k].style.display = counts[k] > 0 ? "" : "none";
       }
-      probeLine.textContent = `probe: ${result.elapsedMs.toFixed(0)}ms`;
+      const ms = result.elapsedMs;
+      probeLine.textContent =
+        `probe: ${ms >= 10000 ? (ms / 1000).toFixed(1) + "s" : ms.toFixed(0) + "ms"}`;
       probeLine.classList.remove("error");
       probeLine.title =
         `${result.ceilingsProbed} ceilings + ${result.floorsProbed} floors marched, ` +
-        `${result.samplesProbed} samples`;
+        `${result.samplesProbed} samples` +
+        (result.workers ? `, across ${result.workers} worker${result.workers === 1 ? "" : "s"}` : "");
     },
     setProbeError(message) {
       probeLine.style.display = "";
@@ -554,7 +561,10 @@ export function createHud(
         s === "code" ? "read from the ROM's code"
           : s === "partition" ? "inferred from the level's partition"
             : s === "observed" ? "observed under Mario"
-              : s === "threshold" ? "assumed from the patch"
+              // Inferred from the wall threshold — which, on an unpatched
+              // ROM, is not "the patch" (the line used to say so regardless).
+              : s === "threshold"
+                ? patched ? "assumed from the patch" : "assumed: unpatched ROM"
                 : "default";
       profileLine.style.display = "";
       profileLine.textContent =

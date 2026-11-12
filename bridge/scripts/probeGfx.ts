@@ -8,7 +8,7 @@
 // (Fast3D vs F3DEX) actually used by this hack.
 
 import { ProcessMemory, findProject64Pid } from "../src/win32.js";
-import { discoverRdram, type Rdram } from "../src/rdram.js";
+import { discoverRdram } from "../src/rdram.js";
 
 // Candidates (US, from sm64.us.map / community docs — VERIFY, don't trust).
 const CAND = {

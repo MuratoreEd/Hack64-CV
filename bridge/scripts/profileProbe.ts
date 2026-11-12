@@ -27,7 +27,7 @@ function main(): void {
     pool.bytes.buffer.slice(
       pool.bytes.byteOffset,
       pool.bytes.byteOffset + pool.bytes.byteLength,
-    ),
+    ) as ArrayBuffer,
     pool.count,
     { baseAddress: pool.poolBase },
   );

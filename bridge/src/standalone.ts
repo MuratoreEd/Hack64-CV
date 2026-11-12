@@ -1,10 +1,10 @@
 // Standalone (packaged .exe) entry point: one process that
 //   1. serves the BUILT viewer (dist/, embedded in the exe) over HTTP,
-//   2. runs the WebSocket bridge on the SAME port,
-//   3. waits for Project64 instead of crashing when it isn't up yet, and
-//      re-attaches automatically when the emulator is closed and reopened,
-//   4. opens the viewer in the default browser (unless --no-open),
-//   5. if another instance is already serving, just opens the browser.
+//   2. runs the WebSocket bridge on the SAME port (session.ts — which waits
+//      for Project64 instead of crashing when it isn't up yet, and re-attaches
+//      automatically when the emulator is closed and reopened),
+//   3. opens the viewer in the default browser (unless --no-open),
+//   4. if another instance is already serving, just opens the browser.
 //
 // Dev never uses this file (start.cmd runs index.ts + Vite); it exists for
 // `npm run build:exe`, which bundles it with esbuild and packs it with pkg.
@@ -13,27 +13,13 @@ import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
-import { WebSocketServer, WebSocket } from "ws";
-import { ProcessMemory, findProject64Pid } from "./win32.js";
-import {
-  discoverRdram,
-  readState,
-  readSurfacePool,
-  readRdramSnapshot,
-  type Rdram,
-  type SurfacePool,
-} from "./rdram.js";
-import type {
-  ServerMessage,
-  SurfacesMessage,
-  ClientMessage,
-} from "../../src/net/protocol.js";
+import { WebSocketServer } from "ws";
 import { LOOPBACK_HOST, verifyClient } from "./wsGuard.js";
+import { startBridgeSession } from "./session.js";
+import { parsePort } from "./args.js";
 import { APP_VERSION as VERSION } from "../../src/version.js";
 
 const DEFAULT_PORT = 8081;
-const STATE_INTERVAL_MS = 100;
-const ATTACH_RETRY_MS = 2000;
 const HEALTH_PATH = "/iwv-health";
 const HEALTH_BODY = `sm64-iwv ${VERSION}`;
 
@@ -50,72 +36,6 @@ const MIME: Record<string, string> = {
   ".png": "image/png",
   ".svg": "image/svg+xml",
   ".ico": "image/x-icon",
-};
-
-// --- Project64 attachment (lazy, retried, self-healing) ---
-
-let attached: { proc: ProcessMemory; rd: Rdram } | null = null;
-let nextAttachTry = 0;
-let lastWaitLog = 0;
-// The last good surface pool: what change detection compares against, and what
-// a viewer connecting mid-load (when the live pool isn't readable) receives.
-let lastPool: SurfacePool | null = null;
-
-/** Try to attach to a running Project64. Throttled: RDRAM discovery scans the
- * whole process, so failed attempts only happen every ATTACH_RETRY_MS. */
-function ensureAttached(): boolean {
-  if (attached) return true;
-  const now = Date.now();
-  if (now < nextAttachTry) return false;
-  nextAttachTry = now + ATTACH_RETRY_MS;
-  try {
-    const pid = findProject64Pid();
-    if (pid == null) throw new Error("Project64 is not running");
-    const proc = new ProcessMemory(pid);
-    const rd = discoverRdram(proc);
-    if (rd == null) {
-      proc.close();
-      throw new Error("SM64 (US) not found in RAM - load the ROM and enter a level");
-    }
-    attached = { proc, rd };
-    lastPool = null; // force a fresh surface send to every viewer
-    console.log(
-      `Attached to Project64 (pid ${pid}); RDRAM base 0x${rd.base.toString(16)}, byte order "${rd.order}".`,
-    );
-    return true;
-  } catch (err) {
-    if (now - lastWaitLog > 10000) {
-      console.log(`Waiting for Project64... (${(err as Error).message})`);
-      lastWaitLog = now;
-    }
-    return false;
-  }
-}
-
-function detach(reason: string): void {
-  if (!attached) return;
-  console.log(`Lost Project64 (${reason}) - waiting for it to come back.`);
-  try {
-    attached.proc.close();
-  } catch {
-    // handle already gone
-  }
-  attached = null;
-}
-
-// --- Bridge messages (same wire protocol as the dev bridge) ---
-
-function surfacesMessage(pool: SurfacePool): SurfacesMessage {
-  return {
-    type: "surfaces",
-    count: pool.count,
-    poolBase: pool.poolBase,
-    base64: pool.bytes.toString("base64"),
-  };
-}
-
-const send = (ws: WebSocket, msg: ServerMessage): void => {
-  if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg));
 };
 
 // --- HTTP static serving of the embedded viewer ---
@@ -147,6 +67,10 @@ function serveStatic(req: http.IncomingMessage, res: http.ServerResponse): void 
   }
   res.writeHead(200, {
     "content-type": MIME[path.extname(file)] ?? "application/octet-stream",
+    // The exe is rebuilt constantly and its asset names only change when their
+    // content does — but index.html keeps its name, and a cached copy would
+    // go on loading the previous build's script.
+    "cache-control": "no-cache",
   });
   res.end(body);
 }
@@ -164,10 +88,12 @@ function openBrowser(url: string): void {
   }).unref();
 }
 
-/** Is another instance of us already serving on this port? */
+/** Is another instance of us already serving on this port? Asked of the
+ * address we actually bind (not "localhost", which may resolve to ::1 first
+ * and cost the full timeout before falling back). */
 async function alreadyRunning(port: number): Promise<boolean> {
   try {
-    const res = await fetch(`http://localhost:${port}${HEALTH_PATH}`, {
+    const res = await fetch(`http://${LOOPBACK_HOST}:${port}${HEALTH_PATH}`, {
       signal: AbortSignal.timeout(1500),
     });
     return (await res.text()).startsWith("sm64-iwv");
@@ -187,12 +113,18 @@ function hang(message: string): Promise<never> {
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
   const noOpen = args.includes("--no-open");
-  const portArg = args.find((a) => a.startsWith("--port="));
-  const port = portArg ? Number.parseInt(portArg.slice(7), 10) : DEFAULT_PORT;
-  const url = `http://localhost:${port}`;
 
   console.log(`SM64 Invisible Wall Viewer v${VERSION}`);
   console.log("----------------------------------------");
+
+  let port: number;
+  try {
+    port = parsePort(args, DEFAULT_PORT);
+  } catch (err) {
+    await hang((err as Error).message);
+    return;
+  }
+  const url = `http://localhost:${port}`;
 
   if (await alreadyRunning(port)) {
     console.log(`Already running at ${url} - opening your browser.`);
@@ -204,72 +136,8 @@ async function main(): Promise<void> {
   // Origin allowlist: WebSockets ignore the same-origin policy, so without it
   // any page open in the user's browser could pull the emulator's RAM.
   const wss = new WebSocketServer({ server, verifyClient });
-
-  wss.on("connection", (ws) => {
-    console.log("viewer connected");
-    if (attached) {
-      try {
-        const pool = readSurfacePool(attached.rd) ?? lastPool;
-        if (pool) send(ws, surfacesMessage(pool));
-        send(ws, { type: "state", ...readState(attached.rd) });
-      } catch (err) {
-        detach((err as Error).message);
-      }
-    }
-    ws.on("message", (data) => {
-      let msg: ClientMessage;
-      try {
-        msg = JSON.parse(data.toString()) as ClientMessage;
-      } catch {
-        return;
-      }
-      if (!attached) return; // viewer will get data once PJ64 is back
-      try {
-        if (msg.type === "refresh") {
-          const pool = readSurfacePool(attached.rd) ?? lastPool;
-          if (pool) send(ws, surfacesMessage(pool));
-        }
-        if (msg.type === "rdram") {
-          const snap = readRdramSnapshot(attached.rd);
-          send(ws, {
-            type: "rdram",
-            size: snap.length,
-            base64: snap.toString("base64"),
-          });
-        }
-      } catch (err) {
-        detach((err as Error).message);
-      }
-    });
-    ws.on("close", () => console.log("viewer disconnected"));
-  });
-
-  // Poll loop: attach when possible, stream state, resend the pool when its
-  // bytes change (dynamic surfaces rewrite in place), self-heal on read errors.
-  setInterval(() => {
-    if (!ensureAttached() || !attached) return;
-    let pool: SurfacePool | null;
-    let stateMsg: ServerMessage;
-    try {
-      pool = readSurfacePool(attached.rd);
-      stateMsg = { type: "state", ...readState(attached.rd) };
-    } catch (err) {
-      // A failed READ means the emulator (or its RDRAM mapping) is gone. An
-      // unreadable pool mid-load is not an error: readSurfacePool says null.
-      detach((err as Error).message);
-      return;
-    }
-    const changed = pool !== null && (lastPool === null || !lastPool.bytes.equals(pool.bytes));
-    if (changed) lastPool = pool;
-    // Serialize once, not once per viewer.
-    const surfacesJson = changed && pool ? JSON.stringify(surfacesMessage(pool)) : null;
-    const stateJson = JSON.stringify(stateMsg);
-    for (const ws of wss.clients) {
-      if (ws.readyState !== WebSocket.OPEN) continue;
-      if (surfacesJson) ws.send(surfacesJson);
-      ws.send(stateJson);
-    }
-  }, STATE_INTERVAL_MS);
+  // The http server's errors are re-emitted here; they're handled below.
+  wss.on("error", () => {});
 
   server.on("error", (err: NodeJS.ErrnoException) => {
     if (err.code === "EADDRINUSE") {
@@ -290,8 +158,15 @@ async function main(): Promise<void> {
     console.log('then click "Connect to Project64" in the browser.');
     console.log("");
     console.log("Keep this window open while you use the viewer.");
+    startBridgeSession(wss);
     if (!noOpen) openBrowser(url);
   });
 }
+
+// A double-clicked console window closes the instant the process dies, taking
+// the reason with it: say what happened and stay open instead.
+process.on("uncaughtException", (err) => {
+  void hang(`Unexpected error: ${err.stack ?? err.message}`);
+});
 
 void main();

@@ -88,8 +88,70 @@ Versions follow [semver](https://semver.org/). The version lives in
   pool anchors mid level-load no longer make the exe drop and rescan
   Project64; the exe's static server rejects sibling-directory paths.
 
+- **The world scale could never be measured on flat ground at y = 0** — the
+  plane's height is 0 at every scale, so a fresh session on a level whose
+  ground is a y = 0 plane probed at 1x on a 4x hack (seen live on level 24).
+  The floor's footprint now breaks the tie: only the true scale puts Mario's
+  column inside the floor the game reports. Near-ties in height no longer pick
+  a scale by a hair's lead either, and a measurement that *disagrees* with the
+  scale in force has to repeat before it re-probes the level.
+- On a scaled hack, a step target that a wall push moved was filed in the wrong
+  column at negative coordinates: the engine truncates the *world* position and
+  then floor-divides (`collisionColumn`), the probe truncated the collision
+  value. One column off, on exactly the one-column cracks the probe looks for.
+- A derived level boundary of 0x8000 wrapped every non-negative coordinate into
+  cell 0 (the game's s16 cell-index sum, reproduced where it cannot apply), so
+  nothing east or south of the origin was ever found. The boundary is also
+  derived from level geometry only — an object carried past a power of two used
+  to flip it, moving every cell border and re-running the probe.
+- Blocked columns were drawn centred on their integer, half a cell off: column
+  5 is `[5, 6)`, column -5 is `(-6, -5]`, column 0 is `(-1, 1)` (`columnSpan`,
+  scale-aware). The inspector's coordinates agree with the boxes now.
+- The textured level, skybox and engine identification were refreshed on a
+  level/area *id* change only. This hack swaps whole maps under one id, which
+  left the previous map's model under the new map's collision; they now follow
+  the level geometry too, and so does the camera's establishing shot.
+- An empty surface pool (title screen, between levels) left the previous
+  level's partition and wall overlay in place, with the oracle judging Mario
+  against geometry that was no longer loaded.
+- Camera: a fly key held while clicking into the note field stayed "down"
+  forever (the release went to the field); a mouse button released outside the
+  window left the view glued to the pointer; Ctrl+C / Ctrl+S flew the camera;
+  holding Shift alone kept the renderer in low-resolution motion mode.
+- Clicking with "Invisible walls" switched off still picked (and highlighted)
+  the hidden walls.
+- Merging probe segments was cubic in the size of a group, and every
+  out-of-bounds segment shares one group: 3000 raw segments took 14.6 s to
+  merge. Same fixpoint, now milliseconds.
+- The HUD said "connected" over an empty scene whenever the exe had no
+  Project64 to read (not started yet, or no level entered). The bridge now
+  reports whether it is attached, and why not.
+- Bridge robustness: a viewer socket error (tab killed mid-send) was an
+  unhandled `error` event that killed the whole bridge; the exe's "port is
+  taken" message never appeared because the same error was re-thrown first;
+  `--port=abc` silently listened on a random port; an unexpected crash closed
+  the console window before it could be read.
+- A level model parse that hit garbage (a stale graph pointer past the end of
+  a 4 MB snapshot) threw out of the message handler instead of reading "no
+  model"; a tile rectangle with a fractional size produced a non-integer
+  texture.
+
 ### Changed
 
+- **The probe runs on several workers at once** (`src/probe/pool.ts`): each
+  marches every N-th surface against the same partition and one merges the
+  slices, giving exactly the single-worker result (asserted segment-for-segment
+  in the tests) in a fraction of the time. Uses every core but one, at most 8.
+- The connect button becomes **Disconnect** while a connection is up, and a
+  connection that drops (the exe being rebuilt or restarted) is retried
+  automatically — relaunching the exe brings the viewer back without a click.
+- The dev bridge (`npm start` in `bridge/`) and the exe share one serving loop
+  (`bridge/src/session.ts`): the dev bridge now also waits for Project64 and
+  re-attaches after it is closed, instead of exiting / logging errors forever.
+  A viewer that falls far behind is skipped rather than queued behind without
+  bound.
+- `npm run typecheck` (and `build:exe`) now type-checks `bridge/` and
+  `scripts/` as well; previously nothing did.
 - The packaged exe now carries the development tools: the **Ground truth**
   panel (flag a false positive or negative, with a note), which used to exist
   only when running from source, and the `window.__ivw` console hook.

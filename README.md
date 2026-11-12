@@ -81,8 +81,9 @@ Then, with Project64 running and a level loaded, just double-click **`start.cmd`
 It launches the RAM bridge and the viewer, and opens the viewer in your browser.
 Click **"Connect to Project64"** in the viewer and the level appears.
 
-If you close and reopen Project64, run `start.cmd` again — it cleans up the old
-bridge and relaunches everything.
+The bridge waits for Project64 and re-attaches by itself when the emulator is
+closed and reopened, and the viewer reconnects by itself when the bridge
+restarts. Running `start.cmd` again relaunches everything from scratch.
 
 ### Testing the packaged exe
 
@@ -120,8 +121,8 @@ Project64 (RDRAM) --ReadProcessMemory--> Node bridge (koffi) --WebSocket--> Web 
   `findFloor` / `findCeil` / `findWallCollisions`. No DOM or Three.js dependencies;
   unit-tested against the decompilation's behavior with Vitest.
 - **`src/probe/`** — marches every static floor and ceiling edge and simulates
-  `perform_ground_quarter_step` to classify where invisible walls occur. Runs in a
-  Web Worker.
+  `perform_ground_quarter_step` to classify where invisible walls occur. Runs in
+  Web Workers, the level split between them.
 - **`src/gfx/`** — parses the game's Fast3D display lists, textures, and skybox out of
   an RAM snapshot for the textured view.
 - **`src/viewer/`** — the Three.js renderer and UI.
@@ -144,6 +145,7 @@ is — e.g. "read from the ROM's code" versus "assumed from the patch".
 npm test          # collision-core + probe unit tests
 npm run corpus    # replay the ground-truth corpus (see corpus/README.md)
 npm run dev       # Vite dev server (viewer)
+npm run typecheck # type-check the viewer, the bridge and the scripts
 npm run build     # type-check + production build
 npm run build:exe # package the standalone exe (dist-exe/InvisibleWallViewer.exe)
 ```

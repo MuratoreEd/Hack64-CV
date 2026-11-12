@@ -21,7 +21,7 @@ import {
 import { detectWallThreshold, readPoolFromRdram } from "./collision/patchDetect";
 import { detectPatchSignatures } from "./collision/patchSignatures";
 import { sessionProbeOptions } from "./probe/config";
-import type { ProbeRequest, ProbeResponse } from "./probe/worker";
+import { ProbePool } from "./probe/pool";
 import { parseSurfacePool, staticFingerprint } from "./collision/surface";
 import type { Surface } from "./collision/surface";
 import { buildLevelModel } from "./gfx/level";
@@ -29,6 +29,7 @@ import { LiveClient } from "./net/liveClient";
 import { BRIDGE_DEFAULT_PORT } from "./net/protocol";
 import type { StateMessage } from "./net/protocol";
 import { SURFACE_FLAG_DYNAMIC, SURFACE_STRUCT_SIZE } from "./collision/constants";
+import { columnSpan } from "./collision/queries";
 import { buildCapture, captureFilename, downloadCapture } from "./corpus/capture";
 
 const app = document.querySelector<HTMLDivElement>("#app");
@@ -42,7 +43,8 @@ viewer.setSurfaces(demoScene());
 // capture panel (flag a spot as a false positive/negative, with a note) and
 // the window.__ivw console hook below. A public release decides what stays.
 const hud = createHud(app, viewer, {
-  onConnect: () => client.connect(),
+  // One button: connect, or — while connected, connecting or retrying — stop.
+  onConnect: () => (client.active ? client.disconnect() : client.connect()),
   onCaptureLabel: captureLabel,
 });
 hud.setCounts(viewer.counts);
@@ -64,9 +66,9 @@ viewer.onAnomalyPick = (seg, box) => {
     kind: seg.kind,
     cells: box
       ? {
-          // Cell c spans [c, c+1) in collision units.
-          x: ((box.cellX0 + box.cellX1 + 1) / 2) * s,
-          z: ((box.cellZ0 + box.cellZ1 + 1) / 2) * s,
+          // The middle of the positions these columns cover (columnSpan).
+          x: ((columnSpan(box.cellX0, s)[0] + columnSpan(box.cellX1, s)[1]) / 2) * s,
+          z: ((columnSpan(box.cellZ0, s)[0] + columnSpan(box.cellZ1, s)[1]) / 2) * s,
           count: (box.cellX1 - box.cellX0 + 1) * (box.cellZ1 - box.cellZ0 + 1),
           yLow: box.yLow * s,
           yHigh: box.yHigh * s,
@@ -112,6 +114,13 @@ let levelKey = "";
 let levelSince = 0;
 let scaleVerifiedFor = "";
 const SCALE_WAIT_MS = 4000;
+// A measurement that DISAGREES with the scale in force re-probes the whole
+// level, so it has to repeat before it is believed: Mario's position is sampled
+// after the step that set his floor pointer, and one skewed frame must not cost
+// a probe run (same reasoning as the floor-selection debounce below).
+let scaleCandidate: number | null = null;
+let scaleStreak = 0;
+const SCALE_STREAK = 2;
 const scaleKey = () => `${levelKey}|${geometryKey}`;
 const scaleVerified = () => levelKey !== "" && scaleVerifiedFor === scaleKey();
 
@@ -190,7 +199,14 @@ function applyProfile(): void {
 }
 
 function rebuildPartition(): void {
-  if (liveSurfaces.length === 0) return;
+  if (liveSurfaces.length === 0) {
+    // An empty pool (title screen, between levels) is not "keep the last
+    // level": the oracle would go on judging Mario against geometry that is
+    // no longer loaded.
+    partition = null;
+    debug.partition = null;
+    return;
+  }
   partition = new SpatialPartition(liveSurfaces, {
     select: activeProfile.select,
     walls: activeProfile.walls,
@@ -218,78 +234,34 @@ let probedKey = "";
 // Level geometry of the overlay on screen (or of the run in flight), so a
 // level change can clear walls that belong to the old geometry at once.
 let probedGeometry = "";
-let probeWorker: Worker | null = null;
-let probeSeq = 0;
-let probeInFlight = false;
 let probeRetry: ReturnType<typeof setTimeout> | null = null;
-// What a result was computed from, for the inspector: pending while in
-// flight, shown once its result is on screen.
-interface ProbeContext {
-  surfaces: Map<number, Surface>;
-  scale: number;
-}
-let pendingProbe: ProbeContext | null = null;
+// What the result on screen was computed from, for the inspector.
 let probedSurfaces = new Map<number, Surface>();
 let probedScale = 1;
-
-function startWorker(): Worker {
-  const w = new Worker(new URL("./probe/worker.ts", import.meta.url), {
-    type: "module",
-  });
-  w.onmessage = (e: MessageEvent<ProbeResponse>) => {
-    if (e.data.id !== probeSeq) return; // superseded
-    probeInFlight = false;
-    hud.setProbeBusy(false);
-    if ("error" in e.data) {
-      // probedKey stays: the same inputs would fail the same way, so only a
-      // change of geometry/scale/profile retries.
-      hud.setProbeError(e.data.error);
-      return;
-    }
-    if (pendingProbe) {
-      probedSurfaces = pendingProbe.surfaces;
-      probedScale = pendingProbe.scale;
-    }
-    viewer.setAnomalies(e.data.result.segments);
-    hud.setInspector(null); // the old pick no longer exists
-    hud.setProbe(e.data.result);
-    debug.probe = e.data.result;
-  };
-  w.onerror = (e) => {
-    // The worker itself failed (e.g. its module didn't load): drop it so the
-    // next change starts a fresh one.
-    probeInFlight = false;
-    hud.setProbeBusy(false);
-    hud.setProbeError(e.message || "probe worker failed");
-    w.terminate();
-    if (probeWorker === w) probeWorker = null;
-  };
-  return w;
-}
-
-function cancelProbe(): void {
-  if (probeInFlight && probeWorker) {
-    probeWorker.terminate();
-    probeWorker = null;
-  }
-  probeInFlight = false;
-  probeSeq++; // anything still in the pipe is now stale
-}
+// The march is split across workers (see probe/pool.ts); a newer request
+// terminates the run in flight.
+const probePool = new ProbePool(
+  () =>
+    new Worker(new URL("./probe/worker.ts", import.meta.url), { type: "module" }),
+);
 
 function runProbe(): void {
-  if (!partition || liveSurfaces.length === 0) return;
   // No state frame yet (the bridge sends the pool first): the first one will
   // call back in, with a level to judge the scale against.
   if (levelKey === "") return;
   // New level geometry: whatever is on screen or in flight describes the old
   // level. Clear it now, even if the new probe has to wait.
   if (staticKey !== probedGeometry) {
-    cancelProbe();
+    probePool.cancel();
     probedGeometry = staticKey;
     probedKey = "";
     viewer.setAnomalies([]);
     hud.setInspector(null);
     hud.setProbe(null);
+  }
+  if (!partition) {
+    hud.setProbeBusy(false); // nothing loaded: nothing to wait for either
+    return;
   }
   // Hold off on a level whose scale isn't confirmed yet (or before the engine
   // has been identified), rather than probing under a stale assumption and
@@ -315,50 +287,80 @@ function runProbe(): void {
     `${staticKey}:${partition.boundary}:${worldScale}:` +
     `${p.wallThreshold}:${p.walls}:${p.select}`;
   if (key === probedKey) {
-    if (!probeInFlight) hud.setProbeBusy(false);
+    if (!probePool.busy) hud.setProbeBusy(false);
     return;
   }
   probedKey = key;
-  cancelProbe();
-  probeWorker ??= startWorker();
   // The probe only ever looks at level geometry; don't clone the objects.
   const statics = liveSurfaces.filter((s) => (s.flags & SURFACE_FLAG_DYNAMIC) === 0);
-  pendingProbe = {
+  const context = {
     surfaces: new Map(statics.map((s) => [s.index, s])),
     scale: worldScale,
   };
-  const request: ProbeRequest = {
-    id: ++probeSeq,
-    surfaces: statics,
-    options: sessionProbeOptions({
+  hud.setProbeBusy(true);
+  probePool.run(
+    statics,
+    sessionProbeOptions({
       worldScale,
       select: p.select,
       walls: p.walls,
       boundary: partition.boundary,
     }),
-  };
-  probeInFlight = true;
-  hud.setProbeBusy(true);
-  probeWorker.postMessage(request);
+    (result) => {
+      hud.setProbeBusy(false);
+      probedSurfaces = context.surfaces;
+      probedScale = context.scale;
+      viewer.setAnomalies(result.segments, context.scale);
+      hud.setInspector(null); // the old pick no longer exists
+      hud.setProbe(result);
+      debug.probe = result;
+    },
+    (message) => {
+      // probedKey stays: the same inputs would fail the same way, so only a
+      // change of geometry/scale/profile retries.
+      hud.setProbeBusy(false);
+      hud.setProbeError(message);
+    },
+  );
 }
 
 // --- Textured level ----------------------------------------------------------
 // The textured view needs a full RDRAM snapshot (graph nodes + display lists +
-// textures). Requested once per level/area — and again (a few times) if the
-// level's graph wasn't in RAM yet, which happens right at a transition.
+// textures), and so does identifying the collision engine. One is requested
+// whenever the level/area OR the level geometry changes — this hack swaps whole
+// maps under one level id, and keying on the id alone left the previous map's
+// model on screen under the new map's collision — and again (a few times) if
+// the level's graph wasn't in RAM yet, which happens right at a transition.
+// The two halves of the key arrive in separate messages moments apart, so the
+// request waits for them to settle rather than firing twice.
 let gfxKey = "";
 let gfxTries = 0;
 const GFX_MAX_TRIES = 5;
-let gfxRetry: ReturnType<typeof setTimeout> | null = null;
+const SNAPSHOT_SETTLE_MS = 150;
+let gfxTimer: ReturnType<typeof setTimeout> | null = null;
 // Camera framing: reframe on a real level/area change only. The new level's
 // surfaces can arrive just before OR just after the state frame that carries
 // the new level id, so the change opens a short window during which incoming
 // surface pools also reframe (frame() is idempotent for identical bounds).
 let reframeUntil = 0;
 
-function requestSnapshot(): void {
-  gfxTries++;
-  client.send({ type: "rdram" });
+function scheduleSnapshot(delayMs: number): void {
+  if (gfxTimer) clearTimeout(gfxTimer);
+  gfxTimer = setTimeout(() => {
+    gfxTimer = null;
+    gfxTries++;
+    client.send({ type: "rdram" });
+  }, delayMs);
+}
+
+/** Ask for a snapshot if what is loaded changed since the last one. */
+function syncSnapshot(): void {
+  if (levelKey === "" || geometryKey === "") return; // need a state AND a pool
+  const want = `${levelKey}|${geometryKey}`;
+  if (want === gfxKey) return;
+  gfxKey = want;
+  gfxTries = 0;
+  scheduleSnapshot(SNAPSHOT_SETTLE_MS);
 }
 
 /** Save what the user knows about the spot Mario is standing on, together with
@@ -413,22 +415,60 @@ const debug: Record<string, unknown> = { viewer, hud, captureLabel };
 const bridgeUrl = import.meta.env.DEV
   ? `ws://localhost:${BRIDGE_DEFAULT_PORT}`
   : `ws://${location.host}`;
+// Whether the socket is open / the bridge has Project64, to notice the moment
+// either comes (back) up.
+let wasConnected = false;
+let wasAttached = true;
+/** What is on the other end may have changed (a different bridge, a restarted
+ * emulator, another ROM): have the next frames fetch a new snapshot — engine
+ * identity + level model — instead of trusting what was learned before. */
+function distrustSession(): void {
+  gfxKey = "";
+  snapshotSeen = false;
+  levelSince = Date.now();
+}
 const client = new LiveClient(bridgeUrl, {
-  onStatus: (text, connected) => hud.setStatus(text, connected),
+  onStatus: (text, connected, active) => {
+    hud.setStatus(text, connected, active);
+    if (connected && !wasConnected) distrustSession();
+    wasConnected = connected;
+    if (!connected) {
+      // Nothing is being measured any more: don't leave a verdict on screen
+      // that looks live.
+      hud.setOracle(null);
+      hud.setCaptureReady(false);
+    }
+  },
+  onBridge: (attached, detail) => {
+    // The exe serves the page before (and after) Project64 exists; without
+    // this the HUD said "connected" over a scene that never arrived.
+    if (attached) {
+      hud.setStatus("connected", true, true);
+      if (!wasAttached) distrustSession();
+    } else {
+      hud.setStatus(`connected — waiting for Project64 (${detail})`, false, true);
+      hud.setOracle(null);
+    }
+    wasAttached = attached;
+  },
   onSurfaces: (surfaces) => {
     liveSurfaces = surfaces;
     const geometry = staticFingerprint(surfaces);
-    if (geometry !== geometryKey) {
+    const geometryChanged = geometry !== geometryKey;
+    if (geometryChanged) {
       geometryKey = geometry;
       levelSince = Date.now(); // the scale wait restarts with new geometry
     }
     staticKey = `${geometryKey}@${activeProfile.wallThreshold}`;
     surfaceByAddr = new Map(surfaces.map((s) => [s.address >>> 0, s]));
     viewer.setSurfaces(surfaces, staticKey);
-    if (Date.now() < reframeUntil) viewer.reframe();
+    // New level geometry is a new place: frame it. (Object surfaces are not
+    // part of the fingerprint, so a platform moving never does this.)
+    if (geometryChanged || Date.now() < reframeUntil) viewer.reframe();
     hud.setCounts(viewer.counts);
     rebuildPartition();
     debug.surfaces = surfaces;
+    syncSnapshot();
     runProbe(); // no-op unless the level geometry (or scale/profile) changed
   },
   onRdram: (bytes) => {
@@ -469,14 +509,16 @@ const client = new LiveClient(bridgeUrl, {
     applyProfile();
     runProbe(); // a probe held for the engine verdict can go now
 
-    const model = buildLevelModel(bytes);
-    if (!model && gfxTries < GFX_MAX_TRIES && !gfxRetry) {
-      const key = gfxKey;
-      gfxRetry = setTimeout(() => {
-        gfxRetry = null;
-        if (key === gfxKey) requestSnapshot();
-      }, 1000);
+    // The display lists are whatever the hack put in RAM; a parse that trips
+    // over garbage must not take the rest of this handler (or the socket's
+    // message loop) with it.
+    let model: ReturnType<typeof buildLevelModel> = null;
+    try {
+      model = buildLevelModel(bytes);
+    } catch (err) {
+      console.warn("level model parse failed:", err);
     }
+    if (!model && gfxTries < GFX_MAX_TRIES && !gfxTimer) scheduleSnapshot(1000);
     viewer.setLevelModel(model);
     hud.setTexturedAvailable(model !== null);
     hud.setSkyboxAvailable(model?.skybox != null);
@@ -488,17 +530,28 @@ const client = new LiveClient(bridgeUrl, {
     hud.setCaptureReady(client.rawPool !== null);
 
     const nextLevel = `${state.level}:${state.area}`;
-    if (nextLevel !== levelKey) {
+    const levelChanged = nextLevel !== levelKey;
+    if (levelChanged) {
       levelKey = nextLevel;
       levelSince = Date.now();
     }
 
-    const detected = detectWorldScale(liveSurfaces, state);
-    if (detected !== null) {
-      const changed = detected !== worldScale;
-      worldScale = detected;
+    const detected = detectWorldScale(liveSurfaces, state, surfaceByAddr);
+    if (detected === worldScale) {
       scaleVerifiedFor = scaleKey();
-      if (changed) rebuildPartition(); // Frame's edge margin is 1/scale
+      scaleCandidate = null;
+    } else if (detected !== null) {
+      if (detected === scaleCandidate) scaleStreak++;
+      else {
+        scaleCandidate = detected;
+        scaleStreak = 1;
+      }
+      if (scaleStreak >= SCALE_STREAK) {
+        worldScale = detected;
+        scaleVerifiedFor = scaleKey();
+        scaleCandidate = null;
+        rebuildPartition(); // Frame's edge margin is 1/scale
+      }
     }
     viewer.setModelScale(worldScale);
 
@@ -520,16 +573,14 @@ const client = new LiveClient(bridgeUrl, {
       }
     }
 
-    if (nextLevel !== gfxKey) {
-      gfxKey = nextLevel;
-      gfxTries = 0;
-      requestSnapshot();
+    if (levelChanged) {
       // A real level/area change: snap the camera to the new level (and let
       // the surface pools arriving over the next moments do the same, in
       // case they land after this state frame).
       viewer.reframe();
       reframeUntil = Date.now() + 2000;
     }
+    syncSnapshot();
     runProbe(); // no-op unless the geometry, scale or profile changed
 
     const moved =

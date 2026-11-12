@@ -64,6 +64,7 @@ import type { Surface } from "../collision/surface";
 import type { FloorSelect, WallModel } from "../collision/profile";
 import { SurfaceKind, deriveLevelBounds } from "../collision/surface";
 import { SpatialPartition, deriveBoundary } from "../collision/partition";
+import { collisionColumn } from "../collision/queries";
 import {
   SURFACE_CAMERA_BOUNDARY,
   SURFACE_FLAG_DYNAMIC,
@@ -153,6 +154,20 @@ export interface ProbeOptions {
    * which surfaces queries resolve to and whether floorAbove treats shadowed
    * floors as region-terminating. Defaults to "first" (vanilla). */
   select?: FloorSelect;
+  /** The hack's world→collision scale (1 = vanilla). The lengths above are
+   * already divided by it; this is for the one thing that isn't a length — how
+   * the engine turns a FRACTIONAL position (a step target a wall push moved)
+   * into an integer column: s16-truncate the world position, then floor-divide
+   * (see collisionColumn). Plain truncation picks the neighbouring column at
+   * negative coordinates on a scaled hack. */
+  worldScale?: number;
+  /** March only every `count`-th static surface, starting at `index` — one
+   * slice of the level, so N workers can split the march between them. The
+   * partition is still built from every surface, so each surface's result is
+   * exactly what an unsharded run computes for it. A sharded run returns RAW
+   * segments (never merged) plus `segmentOrder`; combineShards reassembles
+   * them into the unsharded result. */
+  shard?: { index: number; count: number };
 }
 
 export interface ProbeResult {
@@ -161,6 +176,12 @@ export interface ProbeResult {
   floorsProbed: number;
   samplesProbed: number;
   elapsedMs: number;
+  /** Sharded runs only: for each raw segment, the position of its source
+   * surface in the static surface list — what combineShards sorts on to
+   * restore the order one unsharded run emits them in. */
+  segmentOrder?: number[];
+  /** How many workers shared the march (set by the worker pool). */
+  workers?: number;
 }
 
 /** Plane height of a surface at (x, z): h = -(nx·x + nz·z + oo) / ny. */
@@ -173,6 +194,8 @@ function planeHeight(s: Surface, x: number, z: number): number {
 // a small gap bridges the 1–2 columns where a lone interior sample failed.
 const MERGE_PERP_TOL = 1.0;
 const MERGE_GAP_TOL = 3.0;
+/** No two fusable segments are further apart than this on either axis. */
+const MERGE_REACH = MERGE_GAP_TOL + MERGE_PERP_TOL;
 
 /** If A and B share a kind+blocker, lie on one XZ line, and their extents
  * overlap or nearly touch, return their union; otherwise null. */
@@ -180,6 +203,17 @@ function fuse(
   a: InvisibleWallSegment,
   b: InvisibleWallSegment,
 ): InvisibleWallSegment | null {
+  // Cheap reject first — nearly every pair in a big group is nowhere near each
+  // other. Fusable segments have points within hypot(gap, perp) of one another,
+  // so bounding boxes further apart than gap + perp on either axis cannot fuse.
+  if (
+    (b.x0 < b.x1 ? b.x0 : b.x1) > (a.x0 > a.x1 ? a.x0 : a.x1) + MERGE_REACH ||
+    (b.x0 > b.x1 ? b.x0 : b.x1) < (a.x0 < a.x1 ? a.x0 : a.x1) - MERGE_REACH ||
+    (b.z0 < b.z1 ? b.z0 : b.z1) > (a.z0 > a.z1 ? a.z0 : a.z1) + MERGE_REACH ||
+    (b.z0 > b.z1 ? b.z0 : b.z1) < (a.z0 < a.z1 ? a.z0 : a.z1) - MERGE_REACH
+  ) {
+    return null;
+  }
   // Direction along A (fall back to B, then to a coincidence test for points).
   let ux = a.x1 - a.x0;
   let uz = a.z1 - a.z0;
@@ -204,12 +238,14 @@ function fuse(
     return null;
   // Project all four endpoints onto the axis; require overlap or a small gap.
   const t = (x: number, z: number) => ux * (x - a.x0) + uz * (z - a.z0);
-  const ta = [t(a.x0, a.z0), t(a.x1, a.z1)];
-  const tb = [t(b.x0, b.z0), t(b.x1, b.z1)];
-  const aMin = Math.min(...ta),
-    aMax = Math.max(...ta);
-  const bMin = Math.min(...tb),
-    bMax = Math.max(...tb);
+  const ta0 = t(a.x0, a.z0);
+  const ta1 = t(a.x1, a.z1);
+  const tb0 = t(b.x0, b.z0);
+  const tb1 = t(b.x1, b.z1);
+  const aMin = Math.min(ta0, ta1);
+  const aMax = Math.max(ta0, ta1);
+  const bMin = Math.min(tb0, tb1);
+  const bMax = Math.max(tb0, tb1);
   if (bMin > aMax + MERGE_GAP_TOL || aMin > bMax + MERGE_GAP_TOL) return null;
   const lo = Math.min(aMin, bMin);
   const hi = Math.max(aMax, bMax);
@@ -274,17 +310,28 @@ export function mergeSegments(
   const out: InvisibleWallSegment[] = [];
   for (const group of groups.values()) {
     const items = group.slice();
-    let merged = true;
-    while (merged) {
-      merged = false;
-      for (let i = 0; i < items.length && !merged; i++) {
-        for (let j = i + 1; j < items.length; j++) {
+    // Sweep to a fixpoint: item i absorbs everything it can fuse with (each
+    // fusion re-scans from i + 1, since the grown segment may now reach one it
+    // had passed over), and whole passes repeat until one fuses nothing — at
+    // which point no pair in the group can fuse. The old loop restarted from
+    // the very first pair after EVERY fusion, which is cubic in the group
+    // size: all out-of-bounds segments share one group, and a level with a few
+    // thousand of them spent longer merging than marching (3000 raw segments
+    // took 14.6 s; now milliseconds).
+    let changed = items.length > 1;
+    while (changed) {
+      changed = false;
+      for (let i = 0; i < items.length; i++) {
+        let j = i + 1;
+        while (j < items.length) {
           const f = fuse(items[i], items[j]);
           if (f) {
             items[i] = f;
             items.splice(j, 1);
-            merged = true;
-            break;
+            changed = true;
+            j = i + 1;
+          } else {
+            j++;
           }
         }
       }
@@ -293,6 +340,48 @@ export function mergeSegments(
       out.push({ ...s, columns: dedupeColumns(s.columns) });
   }
   return out;
+}
+
+/**
+ * Reassemble the results of sharded runs (ProbeOptions.shard) into what one
+ * unsharded run returns: raw segments back in source-surface order — within a
+ * surface they come from a single shard, already in emission order — and then
+ * merged once, over the whole level, exactly like the unsharded path.
+ * `elapsedMs` is the slowest shard's; a caller timing the whole run overwrites
+ * it with its own wall clock.
+ */
+export function combineShards(
+  parts: readonly ProbeResult[],
+  merge = true,
+): ProbeResult {
+  const tagged: {
+    order: number;
+    part: number;
+    seq: number;
+    seg: InvisibleWallSegment;
+  }[] = [];
+  let ceilingsProbed = 0;
+  let floorsProbed = 0;
+  let samplesProbed = 0;
+  let elapsedMs = 0;
+  parts.forEach((p, part) => {
+    ceilingsProbed += p.ceilingsProbed;
+    floorsProbed += p.floorsProbed;
+    samplesProbed += p.samplesProbed;
+    elapsedMs = Math.max(elapsedMs, p.elapsedMs);
+    p.segments.forEach((seg, seq) => {
+      tagged.push({ order: p.segmentOrder?.[seq] ?? 0, part, seq, seg });
+    });
+  });
+  tagged.sort((a, b) => a.order - b.order || a.part - b.part || a.seq - b.seq);
+  const raw = tagged.map((t) => t.seg);
+  return {
+    segments: merge ? mergeSegments(raw) : raw,
+    ceilingsProbed,
+    floorsProbed,
+    samplesProbed,
+    elapsedMs,
+  };
 }
 
 const now = (): number =>
@@ -348,6 +437,11 @@ export function findInvisibleWalls(
   const airPass = opts.airPass ?? true;
   const airMaxNormalY = opts.airMaxNormalY ?? -0.5;
   const cullInsideSolid = opts.cullInsideSolid ?? true;
+  // A pushed step target is fractional; the engine's lookups see the integer
+  // column (and height) it converts to, which on a scaled hack is NOT plain
+  // truncation. Integer inputs pass through unchanged.
+  const worldScale = opts.worldScale ?? 1;
+  const col = (c: number): number => collisionColumn(c, worldScale);
   // perform_ground_quarter_step pushes (30, 24) BEFORE (60, 50); scaled from
   // the configured upper push, like everything else in mario_step.c.
   const groundLowerOffset = (30 / 60) * wallOffset;
@@ -573,9 +667,10 @@ export function findInvisibleWalls(
     // through the plane, while Frame's patch ignores the back side; the
     // partition runs whichever routine the ROM has (ProbeOptions.walls).
     push2(tx, py, tz, groundLowerOffset, groundLowerRadius, wallOffset, wallRadius);
-    tx = wallData.x;
-    tz = wallData.z;
-    partition.findFloorInto(tx, py, tz, tFloor);
+    tx = col(wallData.x);
+    tz = col(wallData.z);
+    const qy = col(py);
+    partition.findFloorInto(tx, qy, tz, tFloor);
     if (!tFloor.surface) {
       // Branch 1: floor NULL. Only a narrow crack counts — if the floor never
       // comes back a few units further, this is the level boundary / a real
@@ -583,7 +678,7 @@ export function findInvisibleWalls(
       for (let ext = 2; ext <= 6; ext += 2) {
         partition.findFloorInto(
           Math.round(tx + dirX * ext),
-          py,
+          qy,
           Math.round(tz + dirZ * ext),
           tFloor,
         );
@@ -670,8 +765,8 @@ export function findInvisibleWalls(
     if (wCeil.surface && yTest + marioHeight > wCeil.height) return null;
     // Air wall pushes move the target first: upper (150) then lower (30).
     push2(tx, yTest, tz, airUpperOffset, wallRadius, airLowerOffset, wallRadius);
-    const ax = wallData.x;
-    const az = wallData.z;
+    const ax = col(wallData.x);
+    const az = col(wallData.z);
     partition.findFloorInto(ax, yTest, az, tFloor);
     if (!tFloor.surface) return null; // air OOB: ground marching covers cracks
     const floorH = tFloor.height;
@@ -910,7 +1005,13 @@ export function findInvisibleWalls(
     flush();
   };
 
-  for (const surf of staticSurfaces) {
+  const shard = opts.shard;
+  // Sharded runs: where each raw segment's source surface sits in the static
+  // list, so combineShards can restore the unsharded emission order.
+  const segmentOrder: number[] | undefined = shard ? [] : undefined;
+  for (let si = 0; si < staticSurfaces.length; si++) {
+    if (shard && si % shard.count !== shard.index) continue;
+    const surf = staticSurfaces[si];
     if (surf.type === SURFACE_CAMERA_BOUNDARY) continue;
     // find_floor never returns an intangible floor to Mario, so what his steps
     // see doesn't change across its edges — nothing to march.
@@ -934,10 +1035,14 @@ export function findInvisibleWalls(
         walkSide,
       );
     }
+    if (segmentOrder) {
+      while (segmentOrder.length < segments.length) segmentOrder.push(si);
+    }
   }
 
+  // A shard is one slice of a run: merging belongs to the whole (combineShards).
   const finalSegments =
-    (opts.merge ?? true) ? mergeSegments(segments) : segments;
+    !shard && (opts.merge ?? true) ? mergeSegments(segments) : segments;
 
   return {
     segments: finalSegments,
@@ -945,5 +1050,6 @@ export function findInvisibleWalls(
     floorsProbed,
     samplesProbed,
     elapsedMs: now() - t0,
+    ...(segmentOrder ? { segmentOrder } : {}),
   };
 }

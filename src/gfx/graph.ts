@@ -50,7 +50,10 @@ export function collectAreaDisplayLists(ram: Ram): AreaDisplayList[] | null {
   const areaPtr = ram.u32(US_GCURRENT_AREA);
   if (!KSEG0(areaPtr) || !ram.ok(areaPtr, 0x3c)) return null;
   const root = ram.u32(areaPtr + 4);
-  if (!KSEG0(root) || (ram.s16(root) & 0xffff) !== 0x001) return null;
+  // ram.ok, not just KSEG0: a 4 MB snapshot ends at 0x80400000, and a stale
+  // pointer above that used to throw out of the read instead of reading "no".
+  if (!KSEG0(root) || !ram.ok(root, 0x18)) return null;
+  if ((ram.s16(root) & 0xffff) !== 0x001) return null;
 
   const out: AreaDisplayList[] = [];
   const visited = new Set<number>();
@@ -90,7 +93,10 @@ function findNodeOfType(ram: Ram, type: number, size: number): number | null {
   const areaPtr = ram.u32(US_GCURRENT_AREA);
   if (!KSEG0(areaPtr) || !ram.ok(areaPtr, 0x3c)) return null;
   const root = ram.u32(areaPtr + 4);
-  if (!KSEG0(root) || (ram.s16(root) & 0xffff) !== 0x001) return null;
+  // ram.ok, not just KSEG0: a 4 MB snapshot ends at 0x80400000, and a stale
+  // pointer above that used to throw out of the read instead of reading "no".
+  if (!KSEG0(root) || !ram.ok(root, 0x18)) return null;
+  if ((ram.s16(root) & 0xffff) !== 0x001) return null;
 
   const visited = new Set<number>();
   const walk = (node: number, depth: number): number | null => {

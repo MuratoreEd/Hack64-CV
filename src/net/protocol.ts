@@ -49,7 +49,22 @@ export interface RdramMessage {
   base64: string;
 }
 
-export type ServerMessage = SurfacesMessage | StateMessage | RdramMessage;
+/** Whether the bridge currently has Project64. Sent on connect and whenever it
+ * changes: the packaged exe serves the viewer before the emulator is running
+ * (and after it closes), and otherwise a viewer that connected then would see
+ * "connected" and no data, with nothing to say why. */
+export interface BridgeMessage {
+  type: "bridge";
+  attached: boolean;
+  /** When not attached: what the bridge is waiting for, in plain words. */
+  detail: string;
+}
+
+export type ServerMessage =
+  | SurfacesMessage
+  | StateMessage
+  | RdramMessage
+  | BridgeMessage;
 
 export interface RefreshMessage {
   type: "refresh";

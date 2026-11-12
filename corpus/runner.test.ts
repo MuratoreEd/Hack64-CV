@@ -14,7 +14,7 @@
 
 import { describe, it, expect, beforeAll } from "vitest";
 import { parseSurfacePool } from "../src/collision/surface";
-import { SpatialPartition } from "../src/collision/partition";
+import { deriveBoundary } from "../src/collision/partition";
 import { findInvisibleWalls } from "../src/probe/invisibleWalls";
 import type { ProbeResult } from "../src/probe/invisibleWalls";
 import { sessionProbeOptions } from "../src/probe/config";
@@ -140,16 +140,15 @@ for (const entry of [...pools.values()].sort((a, b) => a.file.localeCompare(b.fi
         baseAddress: pool.pool.poolBase,
         wallThreshold: pool.profile.wallThreshold,
       });
-      // Mirror the app exactly: the partition supplies the boundary, and the
-      // probe options come from the shared session config.
-      const partition = new SpatialPartition(surfaces, { select: pool.profile.select });
+      // Mirror the app exactly: the boundary is the one its partition derives,
+      // and the probe options come from the shared session config.
       result = findInvisibleWalls(
         surfaces,
         sessionProbeOptions({
           worldScale: pool.worldScale,
           select: pool.profile.select,
           walls: pool.profile.walls ?? wallsForThreshold(pool.profile.wallThreshold),
-          boundary: partition.boundary,
+          boundary: deriveBoundary(surfaces),
         }),
       );
     }, 600_000);

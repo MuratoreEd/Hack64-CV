@@ -25,6 +25,7 @@ export function sessionProbeOptions(c: SessionProbeConfig): ProbeOptions {
     wallOffset: 60 / c.worldScale,
     wallRadius: 50 / c.worldScale,
     edgeMargin: 1 / c.worldScale,
+    worldScale: c.worldScale,
     boundary: c.boundary,
     select: c.select,
     walls: c.walls,

@@ -63,6 +63,16 @@ canvas {
   background: #1d4ed8;
 }
 
+/* The connect button while a connection is up (it then says "Disconnect"). */
+.hud button.secondary {
+  background: #2a2e3a;
+  color: #c2c6d2;
+}
+
+.hud button.secondary:hover {
+  background: #363b4a;
+}
+
 .hud .context {
   margin: 6px 0;
   font-size: 11px;

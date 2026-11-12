@@ -5,6 +5,7 @@ import * as THREE from "three";
 import type { Surface, LevelBounds } from "../collision/surface";
 import { SurfaceKind, deriveLevelBounds } from "../collision/surface";
 import { SURFACE_FLAG_DYNAMIC } from "../collision/constants";
+import { columnSpan } from "../collision/queries";
 import { buildCollisionMesh } from "./collisionMesh";
 import type { CollisionMeshView } from "./collisionMesh";
 import type {
@@ -122,6 +123,9 @@ export class Viewer {
   // User-chosen overlay color per kind (HUD color pickers), overriding the
   // palette default; persists across anomaly rebuilds.
   private anomalyKindColor = new Map<InvisibleWallKind, number>();
+  // World scale the anomalies on screen were probed at: it decides where an
+  // integer column physically sits (columnSpan).
+  private anomalyScale = 1;
   private anomalyHighlight: THREE.Mesh | null = null;
   private raycaster = new THREE.Raycaster();
   private pointerDown: { x: number; y: number } | null = null;
@@ -175,9 +179,26 @@ export class Viewer {
     canvas.addEventListener("pointerdown", (e) => {
       this.pointerDown = { x: e.clientX, y: e.clientY };
       this.lastPointer = { x: e.clientX, y: e.clientY };
+      // Keep receiving the drag (and, above all, its END) when the pointer
+      // leaves the window: a button released outside it used to go unseen,
+      // leaving the camera glued to the mouse until the next click.
+      try {
+        canvas.setPointerCapture(e.pointerId);
+      } catch {
+        // pointer already gone
+      }
     });
+    const endDrag = (): void => {
+      this.lastPointer = null;
+      this.pointerDown = null;
+    };
+    window.addEventListener("pointercancel", endDrag);
     window.addEventListener("pointermove", (e) => {
       if (!this.lastPointer) return;
+      if (e.buttons === 0) {
+        endDrag(); // the release was missed: stop following the mouse
+        return;
+      }
       const dx = e.clientX - this.lastPointer.x;
       const dy = e.clientY - this.lastPointer.y;
       this.lastPointer = { x: e.clientX, y: e.clientY };
@@ -201,7 +222,10 @@ export class Viewer {
     // Fly keys. KeyboardEvent.code keeps WASD physical on non-QWERTY layouts.
     window.addEventListener("keydown", (e) => this.onKey(e, true));
     window.addEventListener("keyup", (e) => this.onKey(e, false));
-    window.addEventListener("blur", () => this.keys.clear());
+    window.addEventListener("blur", () => {
+      this.keys.clear();
+      endDrag();
+    });
 
     new ResizeObserver(() => this.onResize()).observe(container);
     this.animate = this.animate.bind(this);
@@ -607,11 +631,15 @@ export class Viewer {
       let z0 = zList[0];
       let z1 = zList[0];
       const emit = () => {
+        // The box covers exactly the positions the engine files under these
+        // columns — not the integers' surroundings (boxes used to be centred
+        // on the integer, half a cell off the real column).
+        const scale = this.anomalyScale;
         Viewer.pushBox(
           out,
-          x0 - 0.5, x1 + 0.5,
+          columnSpan(x0, scale)[0], columnSpan(x1, scale)[1],
           yLow, yHigh,
-          (z0 - 0.5) * zs, (z1 + 0.5) * zs,
+          columnSpan(z0, scale)[0] * zs, columnSpan(z1, scale)[1] * zs,
         );
         boxes?.push({ cellX0: x0, cellX1: x1, cellZ0: z0, cellZ1: z1, yLow, yHigh });
       };
@@ -632,7 +660,8 @@ export class Viewer {
    * kind. One mesh (one draw call) per kind regardless of how many boxes it
    * holds, so kinds stay independently toggleable/pickable. Pass [] to
    * clear. */
-  setAnomalies(segments: InvisibleWallSegment[]): void {
+  setAnomalies(segments: InvisibleWallSegment[], worldScale = 1): void {
+    this.anomalyScale = worldScale;
     for (const mesh of this.anomalyMeshes.values()) {
       this.anomalyGroup.remove(mesh);
       mesh.geometry.dispose();
@@ -717,8 +746,16 @@ export class Viewer {
       ((clientX - rect.left) / rect.width) * 2 - 1,
       -((clientY - rect.top) / rect.height) * 2 + 1,
     );
+    // Render-on-demand means the camera's world matrix is only as fresh as the
+    // last drawn frame; a click can land before the next one.
+    this.camera.updateMatrixWorld();
     this.raycaster.setFromCamera(ndc, this.camera);
-    const meshes = [...this.anomalyMeshes.values()].filter((m) => m.visible);
+    // Raycasting ignores visibility, so honour both toggles here: with the
+    // master "Invisible walls" switch off, a click used to pick (and
+    // highlight) walls that weren't on screen.
+    const meshes = this.anomalyGroup.visible
+      ? [...this.anomalyMeshes.values()].filter((m) => m.visible)
+      : [];
     const hit = this.raycaster.intersectObjects(meshes, false)[0];
     const faceIndex = hit?.faceIndex;
     if (faceIndex == null) {
@@ -879,26 +916,39 @@ export class Viewer {
   }
 
   private onKey(e: KeyboardEvent, down: boolean): void {
+    const code = e.code === "ShiftRight" ? "ShiftLeft" : e.code;
+    if (!FLY_KEYS.has(code)) return;
     const t = e.target as HTMLElement | null;
-    if (
-      t &&
+    const typing =
+      t != null &&
       (t.tagName === "TEXTAREA" ||
         t.isContentEditable ||
         (t instanceof HTMLInputElement &&
-          (t.type === "text" || e.code === "Space")))
-    ) {
-      return; // typing in a field, or Space toggling a focused checkbox
+          (t.type === "text" || e.code === "Space")));
+    if (!down) {
+      // A release ALWAYS counts, wherever focus went in the meantime: W held
+      // while clicking into the note field used to stay "down" for good, and
+      // the camera flew off until the window lost focus.
+      this.keys.delete(code);
+      if (e.code === "Space" && !typing) e.preventDefault();
+      return;
     }
-    const code = e.code === "ShiftRight" ? "ShiftLeft" : e.code;
-    if (!FLY_KEYS.has(code)) return;
-    if (down) this.keys.add(code);
-    else this.keys.delete(code);
+    if (typing) return; // typing in a field, or Space toggling a checkbox
+    // Ctrl+C / Ctrl+S / Alt+D are the browser's, not a request to fly.
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+    this.keys.add(code);
     if (e.code === "Space") e.preventDefault(); // don't scroll the page
   }
 
   /** User fly-speed multiplier (HUD slider), on top of the level-size base. */
   setFlySpeedScale(scale: number): void {
     this.flySpeedScale = scale;
+  }
+
+  /** Whether a key that actually moves the camera is down (Shift alone only
+   * changes the speed, and must not hold the renderer in motion mode). */
+  private flying(): boolean {
+    return this.keys.size > (this.keys.has("ShiftLeft") ? 1 : 0);
   }
 
   private applyLook(): void {
@@ -910,7 +960,7 @@ export class Viewer {
    * strafe, Space/C world up/down, Shift ×4. */
   private updateFly(): void {
     const dt = Math.min(this.clock.getDelta(), 0.1);
-    if (this.keys.size === 0) return;
+    if (!this.flying()) return;
     const speed =
       this.flySpeed *
       this.flySpeedScale *
@@ -935,7 +985,7 @@ export class Viewer {
     requestAnimationFrame(this.animate);
     this.updateFly();
     // Fly keys held or a look-drag in progress → the camera moves this frame.
-    const moving = this.keys.size > 0 || this.lastPointer !== null;
+    const moving = this.flying() || this.lastPointer !== null;
     if (moving) {
       this.needsRender = true;
       if (!this.lowRes && this.baseRatio > 1) {

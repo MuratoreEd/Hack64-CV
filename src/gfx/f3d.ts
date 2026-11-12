@@ -277,8 +277,11 @@ export function interpretDisplayList(
         if (tile === 0) {
           const uls = (w0 >>> 12) & 0xfff;
           const ult = w0 & 0xfff;
-          tileW = (((w1 >>> 12) & 0xfff) - uls) / 4 + 1;
-          tileH = ((w1 & 0xfff) - ult) / 4 + 1;
+          // 10.2 fixed point: the RDP drops the fraction (>> 2). Dividing
+          // left fractional sizes for unusual tile rects, which then sized a
+          // texture buffer and a GL texture with a non-integer width.
+          tileW = ((((w1 >>> 12) & 0xfff) - uls) >> 2) + 1;
+          tileH = (((w1 & 0xfff) - ult) >> 2) + 1;
         }
         break;
       }

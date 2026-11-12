@@ -34,6 +34,45 @@ export function toS16(v: number): number {
   return (i << 16) >> 16; // narrow to s16, sign-extended
 }
 
+/**
+ * World → collision coordinate on a scaled hack: the engine truncates the
+ * world position to s16 and then arithmetic-shifts by log2(scale) — FLOOR
+ * division, not truncation toward zero. That one-unit difference for negative
+ * coordinates decides which triangle owns the point at seams and cell borders,
+ * so it has to match exactly (verified live on a 4× hack). For scale 1 this is
+ * just the vanilla `(s16)pos`.
+ */
+export function worldToCollision(world: number, scale: number): number {
+  return Math.floor(toS16(world) / scale);
+}
+
+/**
+ * The integer column a COLLISION-space float lands in when the engine looks it
+ * up: the same conversion as worldToCollision, applied to `c × scale`. Integers
+ * map to themselves; only fractional positions (a step target a wall push
+ * moved) differ from plain truncation, and only at negative coordinates on a
+ * scaled hack — where truncating picks the neighbouring column. No s16 wrap:
+ * the caller's own lookup applies the vanilla one.
+ */
+export function collisionColumn(c: number, scale: number): number {
+  // `+ 0` turns the -0 that truncating (-1, 0) yields into a plain 0.
+  return (
+    (scale === 1 ? Math.trunc(c) : Math.floor(Math.trunc(c * scale) / scale)) + 0
+  );
+}
+
+/**
+ * The collision-space interval of positions that land in integer column `c`
+ * (the inverse of collisionColumn) — where a blocked column physically is.
+ * Truncation toward zero makes it lopsided: at scale 1 column 5 is [5, 6),
+ * column -5 is (-6, -5], and column 0 is the double-width (-1, 1).
+ */
+export function columnSpan(c: number, scale: number): [number, number] {
+  const t0 = c * scale; // lowest truncated world coordinate in the column
+  const t1 = t0 + scale - 1; // highest
+  return [(t0 > 0 ? t0 : t0 - 1) / scale, (t1 >= 0 ? t1 + 1 : t1) / scale];
+}
+
 /** s32 2D cross-product term `a0*a1 - b0*b1`, emulating the game's integer
  * overflow: Math.imul is a 32-bit signed multiply; `| 0` wraps the subtraction
  * back into s32. Floor/ceil bounds checks depend on this exact behavior. */

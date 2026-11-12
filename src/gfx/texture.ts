@@ -37,6 +37,7 @@ export function decodeTexture(
   tlutAddr: number,
   palette: number,
 ): DecodedTexture | null {
+  if (!Number.isInteger(w) || !Number.isInteger(h)) return null;
   if (w <= 0 || h <= 0 || w > 1024 || h > 1024) return null;
   const texels = w * h;
   const bits = 4 << siz; // siz 0..3 -> 4/8/16/32 bpp

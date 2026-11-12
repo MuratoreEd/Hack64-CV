@@ -10,7 +10,7 @@
 // same way the game does (CELL_SIZE = 2*boundary / NUM_CELLS).
 
 import type { Surface } from "./surface";
-import { SurfaceKind, deriveLevelBounds } from "./surface";
+import { SurfaceKind } from "./surface";
 import {
   SURFACE_FLAG_DYNAMIC,
   VANILLA_LEVEL_BOUNDARY_MAX,
@@ -39,25 +39,41 @@ interface Cell {
   walls: Surface[];
 }
 
-/** Standard boundary values ROM hacks pick from (each doubles the vanilla box). */
-const STANDARD_BOUNDARIES = [0x2000, 0x4000, 0x8000, 0x10000, 0x20000, 0x40000];
+/** Standard boundary values ROM hacks pick from (each doubles the vanilla box).
+ * Vertices are s16, so nothing past 0x8000 can ever be needed. */
+const STANDARD_BOUNDARIES = [0x2000, 0x4000, 0x8000];
 
 /**
  * Derive the effective LEVEL_BOUNDARY_MAX from geometry: the smallest standard
- * boundary that still contains every vertex. Defaults to vanilla (8192).
+ * boundary that still contains every vertex of the LEVEL (static surfaces).
+ * Defaults to vanilla (8192).
+ *
+ * Object surfaces are left out whenever the level has geometry of its own: the
+ * boundary is a property of the ROM, and an object carried or parked past a
+ * power of two would otherwise flip it for as long as it sat there — moving
+ * every cell border, and re-keying (so re-running) the probe each time.
+ *
  * Geometry that pokes past the true boundary (registered into clamped edge
  * cells) can over-estimate this, but that is rare and only affects queries out
  * near the boundary, which the caller can override.
  */
-export function deriveBoundary(surfaces: Surface[]): number {
-  const b = deriveLevelBounds(surfaces);
-  if (!Number.isFinite(b.minX)) return VANILLA_LEVEL_BOUNDARY_MAX;
-  const maxAbs = Math.max(
-    Math.abs(b.minX),
-    Math.abs(b.maxX),
-    Math.abs(b.minZ),
-    Math.abs(b.maxZ),
-  );
+export function deriveBoundary(surfaces: readonly Surface[]): number {
+  let maxAbs = 0;
+  let any = false;
+  for (let pass = 0; pass < 2 && !any; pass++) {
+    for (const s of surfaces) {
+      // First pass: level geometry only. Second (nothing static): everything.
+      if (pass === 0 && (s.flags & SURFACE_FLAG_DYNAMIC) !== 0) continue;
+      any = true;
+      for (const v of s.vertices) {
+        const ax = Math.abs(v[0]);
+        const az = Math.abs(v[2]);
+        if (ax > maxAbs) maxAbs = ax;
+        if (az > maxAbs) maxAbs = az;
+      }
+    }
+  }
+  if (!any) return VANILLA_LEVEL_BOUNDARY_MAX;
   for (const cand of STANDARD_BOUNDARIES) {
     if (maxAbs <= cand) return cand;
   }
@@ -325,11 +341,26 @@ export class SpatialPartition {
 
   // --- Cell indexing (surface_load.c) ---
 
+  /**
+   * `coord + LEVEL_BOUNDARY_MAX` as the cell-index helpers compute it. Vanilla
+   * does the sum in an s16, so a vertex past +24575 wraps negative and clamps
+   * into cell 0 — reproduced for the vanilla boundary. An engine built with a
+   * larger boundary cannot be doing that (at 0x8000 EVERY non-negative
+   * coordinate would wrap, filing half the level under cell 0 where no query
+   * looks), so there the sum is taken at full width.
+   */
+  private cellCoord(coord: number): number {
+    const c =
+      this.boundary === VANILLA_LEVEL_BOUNDARY_MAX
+        ? toS16(coord + this.boundary)
+        : coord + this.boundary;
+    return c < 0 ? 0 : c;
+  }
+
   /** lower_cell_index: offset by boundary (s16-wrapped, as in-game), clamp >=0,
    * divide by CELL_SIZE, pull back one cell when within 50 units of the edge. */
   private lowerCellIndex(coord: number): number {
-    let c = toS16(coord + this.boundary);
-    if (c < 0) c = 0;
+    const c = this.cellCoord(coord);
     let index = Math.trunc(c / this.cellSize);
     if (c % this.cellSize < 50) index -= 1;
     if (index < 0) index = 0;
@@ -339,8 +370,7 @@ export class SpatialPartition {
   /** upper_cell_index: same, but push forward one cell near the far edge and
    * clamp to NUM_CELLS_INDEX. */
   private upperCellIndex(coord: number): number {
-    let c = toS16(coord + this.boundary);
-    if (c < 0) c = 0;
+    const c = this.cellCoord(coord);
     let index = Math.trunc(c / this.cellSize);
     if (c % this.cellSize > this.cellSize - 50) index += 1;
     if (index > this.cellsIndex) index = this.cellsIndex;

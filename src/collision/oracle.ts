@@ -14,18 +14,7 @@ import type { StateMessage } from "../net/protocol";
 import type { SpatialPartition } from "./partition";
 import type { Surface } from "./surface";
 import type { FloorSelect } from "./profile";
-import { toS16 } from "./queries";
-
-/**
- * World → collision coordinate for a scaled hack. The game truncates the world
- * position to s16 and then arithmetic-shifts by log2(scale) — i.e. FLOOR
- * division, not truncation toward zero. This one-unit difference for negative
- * coordinates decides which triangle owns the point at seams/cell borders, so it
- * must match exactly. For scale 1 this is just the vanilla `(s16)pos`.
- */
-function toCollision(world: number, scale: number): number {
-  return Math.floor(toS16(world) / scale);
-}
+import { worldToCollision as toCollision, floorContainsXZ } from "./queries";
 
 export interface FieldOracle {
   ok: boolean;
@@ -112,6 +101,12 @@ function planeHeight(s: Surface, x: number, z: number): number {
   return -(x * s.normal.x + z * s.normal.z + s.originOffset) / s.normal.y;
 }
 
+/** Two candidate scales whose height errors differ by less than this (world
+ * units) are not told apart by height: the true scale reproduces floorHeight to
+ * float noise, so a rival that fits this closely means the plane passes near
+ * the origin, where every scale gives nearly the same answer. */
+const SCALE_AMBIGUITY = 0.5;
+
 /**
  * Detect the world→collision scale from the floor the game reports.
  *
@@ -126,34 +121,54 @@ function planeHeight(s: Surface, x: number, z: number): number {
  * making Mario's hitbox 4x too tall in collision units and inventing a mass of
  * ceiling-blocked columns.)
  *
+ * Height alone cannot decide when the plane passes through (or near) the
+ * origin's height — most commonly FLAT GROUND AT y = 0, where 0 × any scale is
+ * 0. That is a whole level's worth of standing room on some hacks (seen live:
+ * level 24, Mario at world (7037, -4038) on a y = 0 floor — never measured, so
+ * a fresh session probed at 1× on a 4× level). The floor's FOOTPRINT breaks the
+ * tie: the reported floor must contain Mario's column, and the candidate
+ * columns lie on a ray from the origin, so normally only the true scale's
+ * column is inside the triangle.
+ *
  * Also independent of the floor SELECTION rule (first-hit vs highest), so it
- * stays valid on patched ROMs — it only ever asks "where is this surface's
- * plane", never "which surface would we pick".
+ * stays valid on patched ROMs — it only ever asks "where is this surface",
+ * never "which surface would we pick".
  *
  * Returns null when undeterminable this frame (no floor, floor not in our pool,
- * or two candidates fit equally well); callers keep the previous value.
+ * or still ambiguous); callers keep the previous value.
  */
 export function detectWorldScale(
   surfaces: Surface[],
   state: StateMessage,
+  surfaceByAddr?: Map<number, Surface>,
 ): number | null {
   if (!state.floorAddr) return null;
-  const s = surfaces.find((s) => s.address === state.floorAddr);
+  const addr = state.floorAddr >>> 0;
+  const s = surfaceByAddr
+    ? surfaceByAddr.get(addr)
+    : surfaces.find((s) => s.address >>> 0 === addr);
   if (!s || s.normal.y === 0) return null;
-  const fits: { scale: number; err: number }[] = [];
+  const fits: { scale: number; err: number; inside: boolean }[] = [];
   for (const scale of CLEAN_SCALES) {
     const cx = toCollision(state.pos.x, scale);
     const cz = toCollision(state.pos.z, scale);
     const err = Math.abs(planeHeight(s, cx, cz) * scale - state.floorHeight);
     // The plane formula is the game's own, so a correct scale reproduces
     // floorHeight to float noise; 1 world unit is generous.
-    if (err < 1) fits.push({ scale, err });
+    if (err < 1) fits.push({ scale, err, inside: floorContainsXZ(s, cx, cz) });
   }
   if (fits.length === 0) return null;
   fits.sort((a, b) => a.err - b.err);
-  // Ambiguous (e.g. a flat floor at height 0 fits every scale): don't guess.
-  if (fits.length > 1 && fits[1].err - fits[0].err < 1e-6) return null;
-  return fits[0].scale;
+  if (fits.length === 1 || fits[1].err - fits[0].err >= SCALE_AMBIGUITY) {
+    return fits[0].scale;
+  }
+  // Heights tie: fall back to the footprint. Still ambiguous when several
+  // candidates' columns are inside the triangle (or none is — Mario's position
+  // is sampled after the step that set the pointer): don't guess.
+  const inside = fits.filter(
+    (f) => f.inside && f.err - fits[0].err < SCALE_AMBIGUITY,
+  );
+  return inside.length === 1 ? inside[0].scale : null;
 }
 
 /** What the game's reported floor tells us about its selection rule. Returns
