@@ -245,10 +245,12 @@ const OBJECTS = {
 } as const;
 const US_SEGMENT_TABLE = 0x8033b400; // uintptr_t[32], physical offsets
 const US_CURR_COURSE_NUM = 0x8033bac6; // s16
+const US_CURR_ACT_NUM = 0x8033bac8; // s16
 const BEHAVIOR_SEGMENT = 0x13;
 
 export interface ObjectPoolState {
   course: number;
+  act: number;
   behaviorBase: number;
   /** [slot, behavior, x, y, z, behParams] per active slot. */
   objects: [number, number, number, number, number, number][];
@@ -278,6 +280,7 @@ export function readObjects(rd: Rdram): ObjectPoolState {
   }
   return {
     course: rd.s16(US_CURR_COURSE_NUM),
+    act: rd.s16(US_CURR_ACT_NUM),
     behaviorBase: rd.u32(US_SEGMENT_TABLE + BEHAVIOR_SEGMENT * 4),
     objects,
   };

@@ -31,7 +31,15 @@ import type { StateMessage } from "./net/protocol";
 import { SURFACE_FLAG_DYNAMIC, SURFACE_STRUCT_SIZE } from "./collision/constants";
 import { columnSpan } from "./collision/queries";
 import { buildCapture, captureFilename, downloadCapture } from "./corpus/capture";
-import { findCollectibles, type StarSource } from "./objects/collectibles";
+import {
+  absentStars,
+  findCollectibles,
+  placedStars,
+  type AbsentStar,
+  type PlacedStar,
+  type StarSource,
+} from "./objects/collectibles";
+import { readLevelObjects } from "./objects/levelScript";
 import { readStarNames, type StarNames } from "./objects/starNames";
 import type { ObjectsMessage, Vec3 } from "./net/protocol";
 import type { JumpItem } from "./viewer/hud";
@@ -250,6 +258,53 @@ let lastObjects: ObjectsMessage | null = null;
 let starNames: StarNames | null = null;
 let collectiblesKey = "";
 
+// The object pool only holds the current area's objects for the current act.
+// The level script places every star of the level (objects/levelScript.ts);
+// the ones that are NOT loaded are listed too, dimmed, with the reason. The
+// script is read from the RDRAM snapshot, and where a hack keeps the object
+// list only in the ROM, from ROM ranges the bridge reads out of the emulator:
+// the parse reports what it is missing, the ranges are asked for once, and
+// the parse is run again as they arrive.
+let scriptSnapshot: Uint8Array | null = null;
+let levelPlaced: PlacedStar[] = [];
+/** Which level|geometry levelPlaced was read for: a snapshot of the level
+ * just left must not be held against the objects of the one just entered. */
+let levelPlacedFor = "";
+const romCache = new Map<string, Uint8Array | null>();
+const romAsked = new Set<string>();
+const romKey = (offset: number, length: number): string => `${offset}:${length}`;
+
+function readPlacements(): void {
+  if (!scriptSnapshot) return;
+  const level = readLevelObjects(scriptSnapshot, (offset, length) =>
+    romCache.get(romKey(offset, length)),
+  );
+  for (const m of level?.missing ?? []) {
+    const k = romKey(m.offset, m.length);
+    if (romAsked.has(k)) continue;
+    romAsked.add(k);
+    client.send({ type: "rom", offset: m.offset, length: m.length });
+  }
+  levelPlaced = level ? placedStars(level.objects) : [];
+  debug.levelObjects = level;
+  syncCollectibles();
+}
+
+/** "act 2" / "acts 1, 3" for an act mask. */
+function actsLabel(acts: number): string {
+  const list = [1, 2, 3, 4, 5, 6].filter((a) => (acts & (1 << (a - 1))) !== 0);
+  if (list.length === 0) return "no act";
+  return (list.length === 1 ? "act " : "acts ") + list.join(", ");
+}
+
+const ABSENT_TITLE: Record<AbsentStar["reason"], string> = {
+  area: "In another area of this level: not loaded, nowhere to jump to",
+  act: "Only placed in other acts than the one you entered with",
+  gone:
+    "Placed here for this act, but no longer in the level: collected, or " +
+    "already set off, since you entered",
+};
+
 const STAR_SOURCE_NOTE: Record<StarSource, string> = {
   star: "",
   box: "in ! box",
@@ -273,18 +328,47 @@ function syncCollectibles(): void {
   const found = lastObjects
     ? findCollectibles(lastObjects)
     : { course: 0, stars: [], redCoins: [], secrets: [] };
-  const stars: JumpItem[] = found.stars.map((s) => {
-    const name =
-      s.starId === 6 ? "100 coins" : starNames?.actName(found.course, s.starId);
-    const label = `Star ${s.starId + 1}` + (name ? ` · ${name}` : "");
-    return {
+  const starLabel = (starId: number): string => {
+    const name = starId === 6 ? "100 coins" : starNames?.actName(found.course, starId);
+    return `Star ${starId + 1}` + (name ? ` · ${name}` : "");
+  };
+  const liveRows = found.stars.map((s) => {
+    const label = starLabel(s.starId);
+    const item: JumpItem = {
       label,
       note: s.giver ?? (STAR_SOURCE_NOTE[s.source] || undefined),
       // The label again: a long name is cut short in the list.
       title: [label, STAR_SOURCE_TITLE[s.source], at(s.pos)].filter(Boolean).join("\n"),
       pos: s.pos,
     };
+    return { starId: s.starId, item };
   });
+  // Stars the level places that are not loaded right now.
+  const absent =
+    lastObjects && lastState && levelPlacedFor === `${levelKey}|${geometryKey}`
+      ? absentStars(levelPlaced, found.stars, lastState.area, lastObjects.act ?? 0)
+      : [];
+  const absentRows = absent.map((s) => {
+    const label = starLabel(s.starId);
+    const how = s.giver ?? STAR_SOURCE_NOTE[s.source];
+    const item: JumpItem = {
+      label,
+      note:
+        s.reason === "area" ? `area ${s.area}` : s.reason === "act" ? actsLabel(s.acts) : "gone",
+      title: [label, ABSENT_TITLE[s.reason], how && `From: ${how}`, at(s.pos)]
+        .filter(Boolean)
+        .join("\n"),
+      // Another area's coordinates mean nothing in the scene on screen.
+      pos: s.reason === "area" ? undefined : s.pos,
+      dim: true,
+    };
+    return { starId: s.starId, item };
+  });
+  // One list in star order; a loaded star before an absent one of its number.
+  const stars: JumpItem[] = [...liveRows, ...absentRows]
+    .map((row, i) => ({ ...row, i }))
+    .sort((a, b) => a.starId - b.starId || a.i - b.i)
+    .map((row) => row.item);
   const redCoins: JumpItem[] = found.redCoins.map((c, i) => ({
     label: `Red coin ${i + 1}`,
     note: at(c.pos),
@@ -299,12 +383,17 @@ function syncCollectibles(): void {
   if (key === collectiblesKey) return;
   collectiblesKey = key;
   viewer.setMarkers("star", found.stars.map((s) => toScene(s.pos)));
+  viewer.setMarkers(
+    "starAbsent",
+    absent.filter((s) => s.reason !== "area").map((s) => toScene(s.pos)),
+  );
   viewer.setMarkers("redCoin", found.redCoins.map((c) => toScene(c.pos)));
   viewer.setMarkers("secret", found.secrets.map((c) => toScene(c.pos)));
   hud.setJumpList("star", stars);
   hud.setJumpList("redCoin", redCoins);
   hud.setJumpList("secret", secrets);
   debug.collectibles = found;
+  debug.absentStars = absent;
 }
 
 /** Nothing is being read any more: don't leave another level's stars up. */
@@ -522,6 +611,12 @@ let wasAttached = true;
  * identity + level model — instead of trusting what was learned before. */
 function distrustSession(): void {
   gfxKey = "";
+  // Another ROM may be loaded now: what was read from the old one is void.
+  romCache.clear();
+  romAsked.clear();
+  scriptSnapshot = null;
+  levelPlaced = [];
+  levelPlacedFor = "";
   snapshotSeen = false;
   levelSince = Date.now();
 }
@@ -612,7 +707,10 @@ const client = new LiveClient(bridgeUrl, {
     const names = readStarNames(bytes);
     if (names) starNames = names;
     debug.starNames = names;
-    syncCollectibles();
+    // Everything the level places, for the stars that aren't loaded.
+    scriptSnapshot = bytes;
+    levelPlacedFor = gfxKey;
+    readPlacements(); // ends in syncCollectibles()
     snapshotSeen = true;
     applyProfile();
     runProbe(); // a probe held for the engine verdict can go now
@@ -632,6 +730,10 @@ const client = new LiveClient(bridgeUrl, {
     hud.setSkyboxAvailable(model?.skybox != null);
     hud.setFogAvailable(model?.fog != null);
     debug.levelModel = model;
+  },
+  onRom: (offset, length, bytes) => {
+    romCache.set(romKey(offset, length), bytes);
+    readPlacements();
   },
   onObjects: (objects) => {
     lastObjects = objects;

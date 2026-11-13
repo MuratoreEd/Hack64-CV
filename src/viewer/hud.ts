@@ -66,16 +66,22 @@ export interface JumpItem {
   note?: string;
   /** Hover text. */
   title?: string;
-  /** World units, as the game reports positions. */
-  pos: { x: number; y: number; z: number };
+  /** World units, as the game reports positions. Absent when there is nowhere
+   * in the scene to go: the row is then information only. */
+  pos?: { x: number; y: number; z: number };
+  /** Draw the row dimmed: it is about something that is not there now. */
+  dim?: boolean;
 }
 
-const MARKER_LABEL: Record<MarkerKind, string> = {
+/** The kinds that get a HUD row (an absent star is a row of the Stars list). */
+export type JumpListKind = Exclude<MarkerKind, "starAbsent">;
+
+const MARKER_LABEL: Record<JumpListKind, string> = {
   star: "Stars",
   redCoin: "Red coins",
   secret: "Secrets",
 };
-const MARKER_KINDS: MarkerKind[] = ["star", "redCoin", "secret"];
+const MARKER_KINDS: JumpListKind[] = ["star", "redCoin", "secret"];
 
 export interface HudCallbacks {
   onConnect(): void;
@@ -124,7 +130,7 @@ export interface Hud {
   /** Show/hide the "Jump to Mario" button (needs a live position). */
   setMarioAvailable(available: boolean): void;
   /** Replace a kind's jump list. An empty list hides its row altogether. */
-  setJumpList(kind: MarkerKind, items: JumpItem[]): void;
+  setJumpList(kind: JumpListKind, items: JumpItem[]): void;
 }
 
 export function createHud(
@@ -374,7 +380,7 @@ export function createHud(
   // a list of them — click one and the camera goes there. Hidden until the
   // level has any. The list follows the toggle: off means out of the way.
   const jumpRows = {} as Record<
-    MarkerKind,
+    JumpListKind,
     { row: HTMLLabelElement; count: HTMLSpanElement; list: HTMLDivElement; box: HTMLInputElement }
   >;
   for (const kind of MARKER_KINDS) {
@@ -395,6 +401,7 @@ export function createHud(
     list.style.display = "none";
     box.addEventListener("change", () => {
       viewer.setMarkersVisible(kind, box.checked);
+      if (kind === "star") viewer.setMarkersVisible("starAbsent", box.checked);
       list.style.display = box.checked && list.childElementCount > 0 ? "" : "none";
     });
     hud.append(row, list);
@@ -668,10 +675,15 @@ export function createHud(
             b.appendChild(note);
           }
           if (item.title) b.title = item.title;
-          b.addEventListener("click", () => {
-            callbacks.onJump?.(item.pos);
-            b.blur(); // or Space (fly up) would press it again
-          });
+          if (item.dim) b.classList.add("dim");
+          const pos = item.pos;
+          if (!pos) b.disabled = true;
+          else {
+            b.addEventListener("click", () => {
+              callbacks.onJump?.(pos);
+              b.blur(); // or Space (fly up) would press it again
+            });
+          }
           return b;
         }),
       );

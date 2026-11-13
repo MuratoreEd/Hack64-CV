@@ -22,6 +22,9 @@ export interface LiveHandlers {
   onBridge?(attached: boolean, detail: string): void;
   /** The active objects in the level (stars, red coins, everything else). */
   onObjects?(objects: ObjectsMessage): void;
+  /** A range of the cartridge ROM that was asked for, or null if the bridge
+   * has no ROM image (or the range is outside it). */
+  onRom?(offset: number, length: number, bytes: Uint8Array | null): void;
 }
 
 /** How long after losing an established connection before trying again. */
@@ -160,6 +163,13 @@ export class LiveClient {
       // A bridge from before this message existed never sends it; one that
       // sends something malformed must not take the message loop down.
       if (Array.isArray(msg.objects)) this.handlers.onObjects?.(msg);
+    } else if (msg.type === "rom") {
+      const bytes = msg.base64 ? new Uint8Array(base64ToArrayBuffer(msg.base64)) : null;
+      this.handlers.onRom?.(
+        msg.offset,
+        msg.length,
+        bytes && bytes.length === msg.length ? bytes : null,
+      );
     }
   }
 

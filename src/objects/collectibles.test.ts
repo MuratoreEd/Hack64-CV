@@ -1,10 +1,13 @@
 import { describe, it, expect } from "vitest";
 import {
   BHV,
+  absentStars,
   boxStarId,
   findCollectibles,
+  placedStars,
   segmentedBehavior,
 } from "./collectibles";
+import type { ScriptObject } from "./levelScript";
 import type { ObjectsMessage, ObjectRecord } from "../net/protocol";
 
 // Segment 0x13 as it sat in the running hack these addresses were checked on.
@@ -20,6 +23,7 @@ const obj = (
 const message = (objects: ObjectRecord[], course = 15): ObjectsMessage => ({
   type: "objects",
   course,
+  act: 1,
   behaviorBase: BASE,
   objects,
 });
@@ -159,5 +163,80 @@ describe("findCollectibles", () => {
       ]),
     );
     expect(found).toEqual({ course: 15, stars: [], redCoins: [], secrets: [] });
+  });
+});
+
+describe("placedStars / absentStars", () => {
+  const placed = (
+    area: number,
+    acts: number,
+    bhv: number,
+    behParams: number,
+    pos: [number, number, number] = [0, 0, 0],
+  ): ScriptObject => ({
+    area,
+    acts,
+    model: 0x7a,
+    pos: { x: pos[0], y: pos[1], z: pos[2] },
+    behParams,
+    behavior: bhv,
+  });
+
+  it("classifies script placements by the same rules as live objects", () => {
+    const stars = placedStars([
+      placed(1, 0x1f, 0x13000054, 0x00010000, [15277, -7028, -1767]), // Big Mr. I
+      placed(1, 0x1f, 0x13000054, 0x00000000), // an ordinary Mr. I
+      placed(1, 0x1f, BHV.redCoin, 0),
+      placed(2, 0x04, BHV.exclamationBox, 0x000c0000, [5, 6, 7]),
+      placed(2, 0x1f, BHV.exclamationBox, 0x00060000), // ten coins
+    ]);
+    expect(stars).toEqual([
+      { area: 1, acts: 0x1f, pos: { x: 15277, y: -7028, z: -1767 }, starId: 0, source: "giver", giver: "Big Mr. I" },
+      { area: 2, acts: 0x04, pos: { x: 5, y: 6, z: 7 }, starId: 3, source: "box" },
+    ]);
+  });
+
+  it("merges one star placed once per act into a single entry", () => {
+    const stars = placedStars([
+      placed(1, 0x01, BHV.star, 0x02000000, [1, 2, 3]),
+      placed(1, 0x04, BHV.star, 0x02000000, [1, 2, 3]),
+      placed(1, 0x02, BHV.star, 0x02000000, [9, 9, 9]), // somewhere else
+    ]);
+    expect(stars.map((s) => [s.acts, s.pos.x])).toEqual([[0x05, 1], [0x02, 9]]);
+    const every = placedStars([
+      placed(1, 0x01, BHV.star, 0, [1, 2, 3]),
+      placed(1, 0x1f, BHV.star, 0, [1, 2, 3]),
+    ]);
+    expect(every.map((s) => s.acts)).toEqual([0x1f]);
+  });
+
+  it("says why each placed star is not loaded", () => {
+    const stars = placedStars([
+      placed(1, 0x1f, BHV.star, 0x00000000), // star 1: here, live
+      placed(1, 0x1f, BHV.exclamationBox, 0x000a0000), // star 2: here, opened, in the air
+      placed(1, 0x1f, 0x130001f4, 0x02000000), // star 3: King Bob-omb, beaten and collected
+      placed(1, 0x05, BHV.star, 0x03000000), // star 4: acts 1 and 3 only
+      placed(2, 0x1f, BHV.hiddenRedCoinStar, 0x04000000), // star 5: other area
+      placed(2, 0x02, BHV.star, 0x00000000), // star 1 again, in the other area
+    ]);
+    const live = findCollectibles(
+      message([
+        obj(3, BHV.star, [0, 0, 0], 0x00000000),
+        obj(4, BHV.spawnedStar, [0, 50, 0], 0x01000000),
+      ]),
+    ).stars;
+    const absent = absentStars(stars, live, 1, 2);
+    expect(absent.map((s) => [s.starId, s.area, s.reason])).toEqual([
+      [0, 2, "area"],
+      [2, 1, "gone"],
+      [3, 1, "act"],
+      [4, 2, "area"],
+    ]);
+    // In act 3 the act-limited star is simply loaded-or-gone like any other.
+    expect(absentStars(stars, live, 1, 3).find((s) => s.starId === 3)?.reason).toBe("gone");
+    // From the other area, everything in area 1 is elsewhere.
+    expect(absentStars(stars, [], 2, 2).map((s) => s.reason)).toEqual([
+      "area", "gone", "area", "area", "area", "gone",
+    ]);
   });
 });

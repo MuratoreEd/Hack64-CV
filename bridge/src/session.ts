@@ -14,6 +14,7 @@
 
 import { WebSocket, type WebSocketServer } from "ws";
 import { ProcessMemory, findProject64Pid } from "./win32.js";
+import { discoverRom, type RomImage } from "./rom.js";
 import {
   discoverRdram,
   readState,
@@ -37,6 +38,8 @@ const WAIT_LOG_MS = 10000;
  * browser has frozen, say). Piling a fresh ~1 MB pool behind it ten times a
  * second only grows the queue without bound — skip, and catch it up later. */
 const MAX_BUFFERED_BYTES = 16 * 1024 * 1024;
+/** Largest ROM range one request may ask for. */
+const MAX_ROM_READ = 0x100000;
 
 function surfacesMessage(pool: SurfacePool): SurfacesMessage {
   return {
@@ -49,7 +52,9 @@ function surfacesMessage(pool: SurfacePool): SurfacesMessage {
 
 /** Run the bridge on an existing WebSocket server. Returns a stop function. */
 export function startBridgeSession(wss: WebSocketServer): () => void {
-  let attached: { proc: ProcessMemory; rd: Rdram } | null = null;
+  // `rom`: the ROM image in the emulator's memory — looked for on the first
+  // request for ROM bytes (undefined = not looked yet, null = not found).
+  let attached: { proc: ProcessMemory; rd: Rdram; rom?: RomImage | null } | null = null;
   let nextAttachTry = 0;
   let lastWaitLog = 0;
   let waitingFor = "looking for Project64";
@@ -198,6 +203,29 @@ export function startBridgeSession(wss: WebSocketServer): () => void {
             type: "rdram",
             size: snap.length,
             base64: snap.toString("base64"),
+          });
+        } else if (msg.type === "rom") {
+          const { offset, length } = msg;
+          let bytes: Buffer | null = null;
+          if (
+            Number.isInteger(offset) && Number.isInteger(length) &&
+            offset >= 0 && length > 0 && length <= MAX_ROM_READ
+          ) {
+            if (attached.rom === undefined) {
+              attached.rom = discoverRom(attached.proc);
+              console.log(
+                attached.rom
+                  ? `ROM image found at 0x${attached.rom.base.toString(16)}.`
+                  : "No ROM image found in Project64's memory.",
+              );
+            }
+            bytes = attached.rom?.read(offset, length) ?? null;
+          }
+          send(ws, {
+            type: "rom",
+            offset,
+            length,
+            base64: bytes ? bytes.toString("base64") : "",
           });
         }
       } catch (err) {

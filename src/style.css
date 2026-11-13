@@ -110,6 +110,20 @@ canvas {
   color: #fff;
 }
 
+/* A star that is not loaded right now (another act or area, or gone). */
+.hud .jump-list button.dim {
+  color: #7d8494;
+}
+
+.hud .jump-list button:disabled {
+  cursor: default;
+}
+
+.hud .jump-list button:disabled:hover {
+  background: none;
+  color: #7d8494;
+}
+
 .hud .jump-list .note {
   margin-left: auto;
   padding-left: 8px;

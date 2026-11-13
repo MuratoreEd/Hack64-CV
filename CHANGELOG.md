@@ -62,6 +62,15 @@ Versions follow [semver](https://semver.org/). The version lives in
   can be listed: the current area's objects for the current act. Collected
   red coins drop off the list. **Secrets** (the invisible triggers a secrets
   star counts) get the same treatment as red coins: a badge, a toggle, a list.
+- **Stars that aren't loaded**: the level script's object placements are read
+  too (`src/objects/levelScript.ts`) — every area, every act — so the Stars
+  list also shows, dimmed, the stars in the level's other areas, the ones
+  that only exist in other acts, and the ones that were here and are gone
+  (collected, or already set off). The ones in the area on screen get an
+  outline badge and can be jumped to. Where a hack keeps a level's object
+  list only in the ROM, the bridge reads that range from the ROM image in
+  Project64's memory (`bridge/src/rom.ts`, `{type:"rom"}`), so no ROM file is
+  asked for. Macro objects and compressed segments are not read.
 
 ### Fixed
 

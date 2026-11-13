@@ -72,10 +72,24 @@ export interface ObjectsMessage {
   type: "objects";
   /** gCurrCourseNum — which course's star names apply. */
   course: number;
+  /** gCurrActNum (1-6; 0 outside the main courses) — which of the level's
+   * act-specific objects the game loaded. */
+  act: number;
   /** sSegmentTable[0x13]: physical offset of the behaviour-script segment, to
    * turn `behavior` back into the segmented address a behaviour is known by. */
   behaviorBase: number;
   objects: ObjectRecord[];
+}
+
+/** Bytes of the cartridge ROM, read out of the emulator's memory (answer to
+ * a RomRequestMessage). The level's object placements can live only there. */
+export interface RomMessage {
+  type: "rom";
+  offset: number;
+  length: number;
+  /** base64 of `length` bytes; empty when the bridge can't provide them (no
+   * ROM image found in the emulator, or the range is outside it). */
+  base64: string;
 }
 
 export type ServerMessage =
@@ -83,7 +97,8 @@ export type ServerMessage =
   | StateMessage
   | RdramMessage
   | BridgeMessage
-  | ObjectsMessage;
+  | ObjectsMessage
+  | RomMessage;
 
 export interface RefreshMessage {
   type: "refresh";
@@ -94,4 +109,14 @@ export interface RdramRequestMessage {
   type: "rdram";
 }
 
-export type ClientMessage = RefreshMessage | RdramRequestMessage;
+/** Ask the bridge for a range of the ROM (RomMessage). */
+export interface RomRequestMessage {
+  type: "rom";
+  offset: number;
+  length: number;
+}
+
+export type ClientMessage =
+  | RefreshMessage
+  | RdramRequestMessage
+  | RomRequestMessage;

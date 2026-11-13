@@ -35,7 +35,9 @@ export interface AnomalyBox {
 }
 
 /** Things in the level worth finding, drawn as fixed-size screen badges. */
-export type MarkerKind = "star" | "redCoin" | "secret";
+/** "starAbsent": a star the level places on this spot that is not loaded
+ * right now (another act, or already gone) — drawn as an outline. */
+export type MarkerKind = "star" | "starAbsent" | "redCoin" | "secret";
 
 export interface ViewerOptions {
   zFlip?: boolean;
@@ -86,6 +88,7 @@ export class Viewer {
   // geometry for the same reason.
   private markerGroups: Record<MarkerKind, THREE.Group> = {
     star: new THREE.Group(),
+    starAbsent: new THREE.Group(),
     redCoin: new THREE.Group(),
     secret: new THREE.Group(),
   };
@@ -1064,6 +1067,7 @@ const JUMP_DISTANCE = 800;
  * scale s spans s / (2 tan(fov/2)) of the viewport height at any distance). */
 const MARKER_SIZE: Record<MarkerKind, number> = {
   star: 0.036,
+  starAbsent: 0.032,
   redCoin: 0.026,
   secret: 0.03,
 };
@@ -1074,7 +1078,7 @@ function markerMaterial(kind: MarkerKind): THREE.SpriteMaterial {
   canvas.width = canvas.height = 128;
   const g = canvas.getContext("2d")!;
   g.lineJoin = "round";
-  if (kind === "star") {
+  if (kind === "star" || kind === "starAbsent") {
     g.beginPath();
     for (let i = 0; i < 10; i++) {
       const r = i % 2 === 0 ? 58 : 25;
@@ -1082,11 +1086,20 @@ function markerMaterial(kind: MarkerKind): THREE.SpriteMaterial {
       g.lineTo(64 + r * Math.cos(a), 66 + r * Math.sin(a));
     }
     g.closePath();
-    g.fillStyle = "#ffd21f";
-    g.fill();
-    g.lineWidth = 8;
-    g.strokeStyle = "#5a3d00";
-    g.stroke();
+    if (kind === "star") {
+      g.fillStyle = "#ffd21f";
+      g.fill();
+      g.lineWidth = 8;
+      g.strokeStyle = "#5a3d00";
+      g.stroke();
+    } else {
+      // Not there now: a dark star with a pale outline, no gold.
+      g.fillStyle = "rgba(20, 22, 30, 0.55)";
+      g.fill();
+      g.lineWidth = 9;
+      g.strokeStyle = "#f3e3a1";
+      g.stroke();
+    }
   } else if (kind === "secret") {
     // Secrets are invisible in the game; a diamond with a question mark.
     g.beginPath();

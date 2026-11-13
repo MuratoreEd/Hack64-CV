@@ -16,6 +16,7 @@
 // list is the coins still left.
 
 import type { ObjectsMessage } from "../net/protocol";
+import { actsInclude, type ScriptObject } from "./levelScript";
 
 const BHV_SEGMENT = 0x13;
 
@@ -142,9 +143,32 @@ const STAR_SOURCE = new Map<number, StarSource>([
   [BHV.hiddenStar, "secrets"],
 ]);
 
-/** Stars (by star index, then slot), red coins and secrets (by slot) among the live
- * objects. Slot order is the order the level placed them in, so a coin keeps
- * its number while others are collected around it... until the level reloads. */
+/** What star an object with this behaviour and these parameters stands for,
+ * if any. The same rule for a live object and for one the level script only
+ * places: both carry the segmented behaviour and the raw oBehParams. */
+export function classifyStar(
+  bhv: number,
+  behParams: number,
+): { starId: number; source: StarSource; giver?: string } | null {
+  const param2 = (behParams >>> 16) & 0xff;
+  if (bhv === BHV.exclamationBox) {
+    const starId = boxStarId(param2);
+    return starId === null ? null : { starId, source: "box" };
+  }
+  const starId = behParams >>> 24;
+  const source = STAR_SOURCE.get(bhv);
+  if (source) return { starId, source };
+  const giver = GIVER_BY_BHV.get(bhv);
+  if (giver && (giver.when?.(param2) ?? true)) {
+    return { starId, source: "giver", giver: giver.name };
+  }
+  return null;
+}
+
+/** Stars (by star index, then slot), red coins and secrets (by slot) among
+ * the live objects. Slot order is the order the level placed them in, so a
+ * coin keeps its number while others are collected around it... until the
+ * level reloads. */
 export function findCollectibles(msg: ObjectsMessage): Collectibles {
   const stars: StarObject[] = [];
   const redCoins: PointObject[] = [];
@@ -155,32 +179,75 @@ export function findCollectibles(msg: ObjectsMessage): Collectibles {
     if (![x, y, z].every(Number.isFinite)) continue;
     const bhv = segmentedBehavior(behavior >>> 0, msg.behaviorBase);
     const pos = { x, y, z };
-    if (bhv === BHV.redCoin) {
-      redCoins.push({ slot, pos });
-      continue;
-    }
-    if (bhv === BHV.secret) {
-      secrets.push({ slot, pos });
-      continue;
-    }
-    if (bhv === BHV.exclamationBox) {
-      const starId = boxStarId((behParams >>> 16) & 0xff);
-      if (starId !== null) stars.push({ slot, pos, starId, source: "box" });
-      continue;
-    }
-    const starId = behParams >>> 24;
-    const source = STAR_SOURCE.get(bhv);
-    if (source) {
-      stars.push({ slot, pos, starId, source });
-      continue;
-    }
-    const giver = GIVER_BY_BHV.get(bhv);
-    if (giver && (giver.when?.((behParams >>> 16) & 0xff) ?? true)) {
-      stars.push({ slot, pos, starId, source: "giver", giver: giver.name });
+    if (bhv === BHV.redCoin) redCoins.push({ slot, pos });
+    else if (bhv === BHV.secret) secrets.push({ slot, pos });
+    else {
+      const star = classifyStar(bhv, behParams);
+      if (star) stars.push({ slot, pos, ...star });
     }
   }
   stars.sort((a, b) => a.starId - b.starId || a.slot - b.slot);
   redCoins.sort((a, b) => a.slot - b.slot);
   secrets.sort((a, b) => a.slot - b.slot);
   return { course: msg.course, stars, redCoins, secrets };
+}
+
+// --- Stars the level places but the game has not loaded -----------------------
+
+/** A star as the level script places it (levelScript.ts): which area it is
+ * in and which acts it exists in, on top of what a live star says. */
+export interface PlacedStar {
+  area: number;
+  /** Act mask, as in ScriptObject. */
+  acts: number;
+  pos: Vec3;
+  starId: number;
+  source: StarSource;
+  giver?: string;
+}
+
+/** Why a placed star is not among the live objects. */
+export type AbsentReason =
+  | "area" // it is in another area of the level
+  | "act" // it only exists in other acts
+  | "gone"; // it was loaded for this visit and no longer exists
+
+export interface AbsentStar extends PlacedStar {
+  reason: AbsentReason;
+}
+
+/** The stars among a level's placements. The same star placed more than once
+ * on one spot (a copy per act) is one entry with the act masks combined. */
+export function placedStars(objects: ScriptObject[]): PlacedStar[] {
+  const byKey = new Map<string, PlacedStar>();
+  for (const o of objects) {
+    const star = classifyStar(o.behavior, o.behParams);
+    if (!star) continue;
+    const key = [o.area, o.pos.x, o.pos.y, o.pos.z, star.starId, star.source, star.giver].join("|");
+    const seen = byKey.get(key);
+    // 0x1F is "every act", not five bits to add to.
+    if (seen) seen.acts = seen.acts === 0x1f || o.acts === 0x1f ? 0x1f : seen.acts | o.acts;
+    else byKey.set(key, { area: o.area, acts: o.acts, pos: o.pos, ...star });
+  }
+  return [...byKey.values()].sort((a, b) => a.starId - b.starId || a.area - b.area);
+}
+
+/** The placed stars that are not in the live list, each with the reason.
+ * A star that should be loaded here and now (this area, this act) counts as
+ * present when ANY live star has its number: the box has been opened and the
+ * star is in the air, the boss is beaten and the star has spawned. */
+export function absentStars(
+  placed: PlacedStar[],
+  live: StarObject[],
+  area: number,
+  act: number,
+): AbsentStar[] {
+  const liveIds = new Set(live.map((s) => s.starId));
+  const out: AbsentStar[] = [];
+  for (const p of placed) {
+    if (p.area !== area) out.push({ ...p, reason: "area" });
+    else if (!actsInclude(p.acts, act)) out.push({ ...p, reason: "act" });
+    else if (!liveIds.has(p.starId)) out.push({ ...p, reason: "gone" });
+  }
+  return out;
 }
