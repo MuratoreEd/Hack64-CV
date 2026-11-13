@@ -35,7 +35,7 @@ export interface AnomalyBox {
 }
 
 /** Things in the level worth finding, drawn as fixed-size screen badges. */
-export type MarkerKind = "star" | "redCoin";
+export type MarkerKind = "star" | "redCoin" | "secret";
 
 export interface ViewerOptions {
   zFlip?: boolean;
@@ -87,6 +87,7 @@ export class Viewer {
   private markerGroups: Record<MarkerKind, THREE.Group> = {
     star: new THREE.Group(),
     redCoin: new THREE.Group(),
+    secret: new THREE.Group(),
   };
   private markerMaterials: Partial<Record<MarkerKind, THREE.SpriteMaterial>> = {};
   private zFlip: boolean;
@@ -1061,9 +1062,13 @@ const JUMP_DISTANCE = 800;
 
 /** Badge height as a fraction of the view (sizeAttenuation off: a sprite of
  * scale s spans s / (2 tan(fov/2)) of the viewport height at any distance). */
-const MARKER_SIZE: Record<MarkerKind, number> = { star: 0.036, redCoin: 0.026 };
+const MARKER_SIZE: Record<MarkerKind, number> = {
+  star: 0.036,
+  redCoin: 0.026,
+  secret: 0.03,
+};
 
-/** A star or a red coin, drawn on a canvas once per kind. */
+/** A star, a red coin or a secret, drawn on a canvas once per kind. */
 function markerMaterial(kind: MarkerKind): THREE.SpriteMaterial {
   const canvas = document.createElement("canvas");
   canvas.width = canvas.height = 128;
@@ -1082,6 +1087,24 @@ function markerMaterial(kind: MarkerKind): THREE.SpriteMaterial {
     g.lineWidth = 8;
     g.strokeStyle = "#5a3d00";
     g.stroke();
+  } else if (kind === "secret") {
+    // Secrets are invisible in the game; a diamond with a question mark.
+    g.beginPath();
+    g.moveTo(64, 6);
+    g.lineTo(122, 64);
+    g.lineTo(64, 122);
+    g.lineTo(6, 64);
+    g.closePath();
+    g.fillStyle = "#22c7d6";
+    g.fill();
+    g.lineWidth = 8;
+    g.strokeStyle = "#063b42";
+    g.stroke();
+    g.font = "700 72px system-ui, Segoe UI, sans-serif";
+    g.textAlign = "center";
+    g.textBaseline = "middle";
+    g.fillStyle = "#063b42";
+    g.fillText("?", 64, 69);
   } else {
     g.beginPath();
     g.arc(64, 64, 52, 0, Math.PI * 2);

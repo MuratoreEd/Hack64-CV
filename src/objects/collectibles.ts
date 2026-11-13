@@ -29,6 +29,7 @@ export const BHV = {
   redCoin: 0x13003eac,
   bowserCourseRedCoinStar: 0x13003ee4,
   hiddenStar: 0x13003efc,
+  secret: 0x13003f1c, // bhvHiddenStarTrigger; seen live
 } as const;
 
 /** How a star comes to be where its marker is. */
@@ -100,7 +101,8 @@ export interface StarObject {
   giver?: string;
 }
 
-export interface RedCoinObject {
+/** A red coin or a secret: nothing to say about it but where it is. */
+export interface PointObject {
   slot: number;
   pos: Vec3;
 }
@@ -108,7 +110,9 @@ export interface RedCoinObject {
 export interface Collectibles {
   course: number;
   stars: StarObject[];
-  redCoins: RedCoinObject[];
+  redCoins: PointObject[];
+  /** The invisible triggers a "secrets" star counts (touched ones are gone). */
+  secrets: PointObject[];
 }
 
 /** Object.behavior (a KSEG0 pointer) → the behaviour's segmented address, or
@@ -138,12 +142,13 @@ const STAR_SOURCE = new Map<number, StarSource>([
   [BHV.hiddenStar, "secrets"],
 ]);
 
-/** Stars (by star index, then slot) and red coins (by slot) among the live
+/** Stars (by star index, then slot), red coins and secrets (by slot) among the live
  * objects. Slot order is the order the level placed them in, so a coin keeps
  * its number while others are collected around it... until the level reloads. */
 export function findCollectibles(msg: ObjectsMessage): Collectibles {
   const stars: StarObject[] = [];
-  const redCoins: RedCoinObject[] = [];
+  const redCoins: PointObject[] = [];
+  const secrets: PointObject[] = [];
   for (const rec of msg.objects) {
     if (!Array.isArray(rec) || rec.length < 6) continue;
     const [slot, behavior, x, y, z, behParams] = rec;
@@ -152,6 +157,10 @@ export function findCollectibles(msg: ObjectsMessage): Collectibles {
     const pos = { x, y, z };
     if (bhv === BHV.redCoin) {
       redCoins.push({ slot, pos });
+      continue;
+    }
+    if (bhv === BHV.secret) {
+      secrets.push({ slot, pos });
       continue;
     }
     if (bhv === BHV.exclamationBox) {
@@ -172,5 +181,6 @@ export function findCollectibles(msg: ObjectsMessage): Collectibles {
   }
   stars.sort((a, b) => a.starId - b.starId || a.slot - b.slot);
   redCoins.sort((a, b) => a.slot - b.slot);
-  return { course: msg.course, stars, redCoins };
+  secrets.sort((a, b) => a.slot - b.slot);
+  return { course: msg.course, stars, redCoins, secrets };
 }

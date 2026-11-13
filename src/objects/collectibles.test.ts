@@ -73,6 +73,7 @@ describe("findCollectibles", () => {
     ]);
     expect(found.stars[3].pos).toEqual({ x: 8607, y: 4581, z: 5399 });
     expect(found.redCoins).toEqual([]);
+    expect(found.secrets).toEqual([]);
   });
 
   it("lists red coins in slot order", () => {
@@ -86,6 +87,22 @@ describe("findCollectibles", () => {
     expect(found.redCoins.map((c) => c.slot)).toEqual([1, 35, 42]);
     expect(found.redCoins[0].pos).toEqual({ x: 17832, y: -5319, z: -16780 });
     expect(found.stars).toEqual([]);
+  });
+
+  it("lists secrets in slot order, apart from the star they unlock", () => {
+    const found = findCollectibles(
+      message([
+        obj(33, BHV.hiddenStar, [12402, 669, -15182], 0x01000000),
+        obj(9, BHV.secret, [5, 6, 7]),
+        obj(0, BHV.secret, [-12591, -2041, -10715]),
+      ]),
+    );
+    expect(found.secrets).toEqual([
+      { slot: 0, pos: { x: -12591, y: -2041, z: -10715 } },
+      { slot: 9, pos: { x: 5, y: 6, z: 7 } },
+    ]);
+    expect(found.stars.map((s) => s.source)).toEqual(["secrets"]);
+    expect(found.redCoins).toEqual([]);
   });
 
   it("counts spawned stars and the Bowser-course red coin star", () => {
@@ -134,7 +151,6 @@ describe("findCollectibles", () => {
   it("ignores everything else, and records it can't use", () => {
     const found = findCollectibles(
       message([
-        obj(0, 0x13003f1c, [1, 2, 3]), // a secret: not a star
         obj(1, 0x13000054, [1, 2, 3]),
         [2, 0, 0, 0, 0, 0], // null behaviour
         [3, virt(BHV.star), NaN, 0, 0, 0],
@@ -142,6 +158,6 @@ describe("findCollectibles", () => {
         null as unknown as ObjectRecord,
       ]),
     );
-    expect(found).toEqual({ course: 15, stars: [], redCoins: [] });
+    expect(found).toEqual({ course: 15, stars: [], redCoins: [], secrets: [] });
   });
 });

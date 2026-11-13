@@ -272,7 +272,7 @@ const at = (p: Vec3): string =>
 function syncCollectibles(): void {
   const found = lastObjects
     ? findCollectibles(lastObjects)
-    : { course: 0, stars: [], redCoins: [] };
+    : { course: 0, stars: [], redCoins: [], secrets: [] };
   const stars: JumpItem[] = found.stars.map((s) => {
     const name =
       s.starId === 6 ? "100 coins" : starNames?.actName(found.course, s.starId);
@@ -290,13 +290,20 @@ function syncCollectibles(): void {
     note: at(c.pos),
     pos: c.pos,
   }));
-  const key = JSON.stringify([worldScale, stars, redCoins]);
+  const secrets: JumpItem[] = found.secrets.map((c, i) => ({
+    label: `Secret ${i + 1}`,
+    note: at(c.pos),
+    pos: c.pos,
+  }));
+  const key = JSON.stringify([worldScale, stars, redCoins, secrets]);
   if (key === collectiblesKey) return;
   collectiblesKey = key;
   viewer.setMarkers("star", found.stars.map((s) => toScene(s.pos)));
   viewer.setMarkers("redCoin", found.redCoins.map((c) => toScene(c.pos)));
+  viewer.setMarkers("secret", found.secrets.map((c) => toScene(c.pos)));
   hud.setJumpList("star", stars);
   hud.setJumpList("redCoin", redCoins);
+  hud.setJumpList("secret", secrets);
   debug.collectibles = found;
 }
 

@@ -67,6 +67,12 @@ canvas {
   border-radius: 50%;
 }
 
+.hud .swatch.marker-secret {
+  background: #22c7d6;
+  border-radius: 0;
+  clip-path: polygon(50% 0, 100% 50%, 50% 100%, 0 50%);
+}
+
 /* Jump lists: one compact row per star / red coin, scrolling past ~6 rows. */
 .hud .jump-list {
   max-width: 300px;

@@ -60,7 +60,8 @@ Versions follow [semver](https://semver.org/). The version lives in
   Koopa the Quick, the treasure chests…) is listed at the object that awards
   it, numbered from that object's parameters. Only what the game has loaded
   can be listed: the current area's objects for the current act. Collected
-  red coins drop off the list.
+  red coins drop off the list. **Secrets** (the invisible triggers a secrets
+  star counts) get the same treatment as red coins: a badge, a toggle, a list.
 
 ### Fixed
 

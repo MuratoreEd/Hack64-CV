@@ -73,8 +73,9 @@ export interface JumpItem {
 const MARKER_LABEL: Record<MarkerKind, string> = {
   star: "Stars",
   redCoin: "Red coins",
+  secret: "Secrets",
 };
-const MARKER_KINDS: MarkerKind[] = ["star", "redCoin"];
+const MARKER_KINDS: MarkerKind[] = ["star", "redCoin", "secret"];
 
 export interface HudCallbacks {
   onConnect(): void;
