@@ -255,12 +255,16 @@ const STAR_SOURCE_NOTE: Record<StarSource, string> = {
   box: "in ! box",
   redCoins: "red coins",
   secrets: "secrets",
+  giver: "", // the giver's own name is shown instead
 };
 const STAR_SOURCE_TITLE: Record<StarSource, string> = {
   star: "",
   box: "Inside an exclamation box here",
   redCoins: "Appears here once every red coin is collected",
   secrets: "Appears here once every secret is found",
+  giver:
+    "Awarded by the object marked here. Where the star then appears is set " +
+    "in the game's code and may be somewhere else.",
 };
 const at = (p: Vec3): string =>
   `(${p.x.toFixed(0)}, ${p.y.toFixed(0)}, ${p.z.toFixed(0)})`;
@@ -275,7 +279,7 @@ function syncCollectibles(): void {
     const label = `Star ${s.starId + 1}` + (name ? ` · ${name}` : "");
     return {
       label,
-      note: STAR_SOURCE_NOTE[s.source] || undefined,
+      note: s.giver ?? (STAR_SOURCE_NOTE[s.source] || undefined),
       // The label again: a long name is cut short in the list.
       title: [label, STAR_SOURCE_TITLE[s.source], at(s.pos)].filter(Boolean).join("\n"),
       pos: s.pos,

@@ -56,9 +56,11 @@ Versions follow [semver](https://semver.org/). The version lives in
   the camera there. Stars are listed with their number, how they are obtained
   (placed, in an exclamation box, red coins, secrets) and the hack's own star
   name, read from the game's text segment (`src/objects/starNames.ts`). Only
-  what the game has loaded can be listed: the current area's objects for the
-  current act, and a boss or race star only once it has spawned. Collected red
-  coins drop off the list.
+  A star handed out by a boss, a race or a task (King Bob-omb, Big Mr. I,
+  Koopa the Quick, the treasure chests…) is listed at the object that awards
+  it, numbered from that object's parameters. Only what the game has loaded
+  can be listed: the current area's objects for the current act. Collected
+  red coins drop off the list.
 
 ### Fixed
 

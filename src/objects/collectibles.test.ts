@@ -105,6 +105,32 @@ describe("findCollectibles", () => {
     ]);
   });
 
+  it("lists a boss's star at the boss, numbered from the boss's parameters", () => {
+    // Live: two Mr. I in one level, only the big one (second byte 1) holds a
+    // star — star 1, the one that was missing from the list.
+    const found = findCollectibles(
+      message([
+        obj(31, 0x13000054, [-974, -9249, -4074], 0x00000000),
+        obj(39, 0x13000054, [15277, -7028, -1767], 0x00010000),
+        obj(40, 0x130001f4, [0, 0, 0], 0x02000000), // King Bob-omb, star 3
+      ]),
+    );
+    expect(found.stars).toEqual([
+      { slot: 39, pos: { x: 15277, y: -7028, z: -1767 }, starId: 0, source: "giver", giver: "Big Mr. I" },
+      { slot: 40, pos: { x: 0, y: 0, z: 0 }, starId: 2, source: "giver", giver: "King Bob-omb" },
+    ]);
+  });
+
+  it("tells Koopa the Quick from an ordinary Koopa", () => {
+    const koopa = (param2: number): ObjectRecord =>
+      obj(param2, 0x13004580, [0, 0, 0], 0x01000000 | (param2 << 16));
+    const found = findCollectibles(message([0, 1, 2, 3, 4].map(koopa)));
+    expect(found.stars.map((s) => [s.slot, s.giver])).toEqual([
+      [2, "Koopa the Quick"],
+      [3, "Koopa the Quick"],
+    ]);
+  });
+
   it("ignores everything else, and records it can't use", () => {
     const found = findCollectibles(
       message([
