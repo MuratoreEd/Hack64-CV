@@ -1,7 +1,7 @@
 // DOM overlay: connect button, connection status, live level/area/Mario info,
 // the "core vs game" oracle panel, and per-kind visibility toggles with counts.
 
-import type { Viewer } from "./viewer";
+import type { Viewer, MarkerKind } from "./viewer";
 import { SurfaceKind } from "../collision/surface";
 import {
   KIND_COLOR,
@@ -59,8 +59,29 @@ const ORDER: SurfaceKind[] = [
   SurfaceKind.Ceiling,
 ];
 
+/** One row of a star / red-coin list: click it and the camera goes there. */
+export interface JumpItem {
+  label: string;
+  /** Dimmer text after the label (how the star is obtained, a position). */
+  note?: string;
+  /** Hover text. */
+  title?: string;
+  /** World units, as the game reports positions. */
+  pos: { x: number; y: number; z: number };
+}
+
+const MARKER_LABEL: Record<MarkerKind, string> = {
+  star: "Stars",
+  redCoin: "Red coins",
+};
+const MARKER_KINDS: MarkerKind[] = ["star", "redCoin"];
+
 export interface HudCallbacks {
   onConnect(): void;
+  /** Put the camera on Mario. */
+  onJumpToMario?(): void;
+  /** Put the camera on a list entry (world-unit position). */
+  onJump?(pos: { x: number; y: number; z: number }): void;
   /** Save a ground-truth label at Mario's current position (corpus capture).
    * Returns what to show the user; throws are reported in the same line. */
   onCaptureLabel?(label: "wall" | "clear", note: string): Promise<string>;
@@ -99,6 +120,10 @@ export interface Hud {
   setProfile(info: ProfileInfo): void;
   /** Enable the ground-truth capture panel (needs a live pool + position). */
   setCaptureReady(ready: boolean): void;
+  /** Show/hide the "Jump to Mario" button (needs a live position). */
+  setMarioAvailable(available: boolean): void;
+  /** Replace a kind's jump list. An empty list hides its row altogether. */
+  setJumpList(kind: MarkerKind, items: JumpItem[]): void;
 }
 
 export function createHud(
@@ -147,6 +172,19 @@ export function createHud(
   const context = document.createElement("div");
   context.className = "context";
   hud.appendChild(context);
+
+  // Camera → Mario. The level can be enormous and the badge is small; this is
+  // the quick way back to where the player actually is. (Also the M key.)
+  const marioBtn = document.createElement("button");
+  marioBtn.className = "jump-mario";
+  marioBtn.textContent = "Jump to Mario";
+  marioBtn.title = "Move the camera to Mario (M)";
+  marioBtn.style.display = "none";
+  marioBtn.addEventListener("click", () => {
+    callbacks.onJumpToMario?.();
+    marioBtn.blur(); // or Space (fly up) would press it again
+  });
+  hud.appendChild(marioBtn);
 
   // Which collision engine the ROM runs — a ROM-level collision patch changes
   // real query behavior, so this drives the whole core and is worth surfacing.
@@ -331,6 +369,37 @@ export function createHud(
   inspector.append(inspTitle, inspBody);
   hud.appendChild(inspector);
 
+  // Stars and red coins: a toggle for the badges in the scene and, under it,
+  // a list of them — click one and the camera goes there. Hidden until the
+  // level has any. The list follows the toggle: off means out of the way.
+  const jumpRows = {} as Record<
+    MarkerKind,
+    { row: HTMLLabelElement; count: HTMLSpanElement; list: HTMLDivElement; box: HTMLInputElement }
+  >;
+  for (const kind of MARKER_KINDS) {
+    const row = document.createElement("label");
+    const box = document.createElement("input");
+    box.type = "checkbox";
+    box.checked = true;
+    const swatch = document.createElement("span");
+    swatch.className = `swatch marker-${kind}`;
+    const name = document.createElement("span");
+    name.textContent = MARKER_LABEL[kind];
+    const count = document.createElement("span");
+    count.className = "count";
+    row.append(box, swatch, name, count);
+    row.style.display = "none";
+    const list = document.createElement("div");
+    list.className = "jump-list";
+    list.style.display = "none";
+    box.addEventListener("change", () => {
+      viewer.setMarkersVisible(kind, box.checked);
+      list.style.display = box.checked && list.childElementCount > 0 ? "" : "none";
+    });
+    hud.append(row, list);
+    jumpRows[kind] = { row, count, list, box };
+  }
+
   // Ground-truth capture (corpus labelling). Only built when a capture handler
   // is supplied (main.ts always supplies one, in the exe too). Saves what the
   // user knows about the spot Mario is standing on, with the surface pool that
@@ -413,7 +482,9 @@ export function createHud(
 
   const hint = document.createElement("div");
   hint.className = "hint";
-  hint.textContent = "WASD fly · Space/C up/down · Shift fast · drag to look";
+  hint.textContent =
+    "WASD fly · Space/C up/down · Shift fast · drag to look\nM jump to Mario";
+  hint.style.whiteSpace = "pre-line";
   hud.appendChild(hint);
 
   container.appendChild(hud);
@@ -575,6 +646,35 @@ export function createHud(
         `wall threshold ±${p.wallThreshold} (${via(info.thresholdSource)})\n` +
         `wall routine: ${p.walls === "frame" ? "one-sided (Frame)" : "vanilla"}` +
         ` (${via(info.wallsSource)})`;
+    },
+    setMarioAvailable(available) {
+      marioBtn.style.display = available ? "" : "none";
+    },
+    setJumpList(kind, items) {
+      const { row, count, list, box } = jumpRows[kind];
+      row.style.display = items.length > 0 ? "" : "none";
+      count.textContent = String(items.length);
+      list.replaceChildren(
+        ...items.map((item) => {
+          const b = document.createElement("button");
+          const label = document.createElement("span");
+          label.textContent = item.label;
+          b.appendChild(label);
+          if (item.note) {
+            const note = document.createElement("span");
+            note.className = "note";
+            note.textContent = item.note;
+            b.appendChild(note);
+          }
+          if (item.title) b.title = item.title;
+          b.addEventListener("click", () => {
+            callbacks.onJump?.(item.pos);
+            b.blur(); // or Space (fly up) would press it again
+          });
+          return b;
+        }),
+      );
+      list.style.display = box.checked && items.length > 0 ? "" : "none";
     },
     setCaptureReady(ready) {
       if (!callbacks.onCaptureLabel || ready === captureReady) return;

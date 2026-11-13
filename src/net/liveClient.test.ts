@@ -144,6 +144,26 @@ describe("LiveClient connection lifecycle", () => {
     ]);
   });
 
+  it("forwards the object list, and drops one without a list in it", () => {
+    const seen: number[] = [];
+    const client = new LiveClient("ws://test", {
+      onStatus: () => {},
+      onSurfaces: () => {},
+      onState: () => {},
+      onRdram: () => {},
+      onObjects: (m) => seen.push(m.objects.length),
+    });
+    client.connect();
+    const ws = FakeSocket.instances[0];
+    ws.open();
+    const objects = [[22, 0x800f6fbc, 8607, 4581, 5399, 0x04000000]];
+    ws.onmessage?.({
+      data: JSON.stringify({ type: "objects", course: 15, behaviorBase: 0xf3180, objects }),
+    });
+    ws.onmessage?.({ data: JSON.stringify({ type: "objects", course: 15 }) });
+    expect(seen).toEqual([1]);
+  });
+
   it("only sends while the socket is open", () => {
     const { client } = setup();
     client.send({ type: "rdram" }); // not connected: dropped, not thrown

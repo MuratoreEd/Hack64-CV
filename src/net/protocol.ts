@@ -60,11 +60,30 @@ export interface BridgeMessage {
   detail: string;
 }
 
+/** One live object slot: `[slot, behavior, x, y, z, behParams]`. `behavior`
+ * is the KSEG0 address of the object's behaviour script (Object.behavior),
+ * the position is in world units, `behParams` is the raw u32 (oBehParams). */
+export type ObjectRecord = [number, number, number, number, number, number];
+
+/** The active objects in gObjectPool. The bridge stays ignorant of what any of
+ * them are: the viewer picks out stars and red coins by behaviour script
+ * (src/objects/collectibles.ts). Sent on connect and whenever it changes. */
+export interface ObjectsMessage {
+  type: "objects";
+  /** gCurrCourseNum — which course's star names apply. */
+  course: number;
+  /** sSegmentTable[0x13]: physical offset of the behaviour-script segment, to
+   * turn `behavior` back into the segmented address a behaviour is known by. */
+  behaviorBase: number;
+  objects: ObjectRecord[];
+}
+
 export type ServerMessage =
   | SurfacesMessage
   | StateMessage
   | RdramMessage
-  | BridgeMessage;
+  | BridgeMessage
+  | ObjectsMessage;
 
 export interface RefreshMessage {
   type: "refresh";

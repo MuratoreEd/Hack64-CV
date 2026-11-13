@@ -31,6 +31,10 @@ import type { StateMessage } from "./net/protocol";
 import { SURFACE_FLAG_DYNAMIC, SURFACE_STRUCT_SIZE } from "./collision/constants";
 import { columnSpan } from "./collision/queries";
 import { buildCapture, captureFilename, downloadCapture } from "./corpus/capture";
+import { findCollectibles, type StarSource } from "./objects/collectibles";
+import { readStarNames, type StarNames } from "./objects/starNames";
+import type { ObjectsMessage, Vec3 } from "./net/protocol";
+import type { JumpItem } from "./viewer/hud";
 
 const app = document.querySelector<HTMLDivElement>("#app");
 if (!app) throw new Error("#app container not found");
@@ -46,8 +50,20 @@ const hud = createHud(app, viewer, {
   // One button: connect, or — while connected, connecting or retrying — stop.
   onConnect: () => (client.active ? client.disconnect() : client.connect()),
   onCaptureLabel: captureLabel,
+  onJumpToMario: jumpToMario,
+  onJump: (pos) => viewer.jumpTo(toScene(pos)),
 });
 hud.setCounts(viewer.counts);
+
+// M = jump to Mario, unless the key is going into a text field.
+window.addEventListener("keydown", (e) => {
+  if (e.code !== "KeyM" || e.repeat || e.ctrlKey || e.metaKey || e.altKey) return;
+  const t = e.target as HTMLElement | null;
+  if (t && (t.tagName === "TEXTAREA" || t.tagName === "INPUT" || t.isContentEditable)) {
+    return;
+  }
+  jumpToMario();
+});
 
 // Clicking an anomaly box resolves it back to the responsible surfaces (only
 // main.ts holds the pool + world scale) and drives the inspector panel. The
@@ -213,6 +229,77 @@ function rebuildPartition(): void {
     edgeMargin: 1 / worldScale,
   });
   debug.partition = partition;
+}
+
+/** World units (what the game reports) → the scene's collision space. */
+function toScene(p: Vec3): Vec3 {
+  return { x: p.x / worldScale, y: p.y / worldScale, z: p.z / worldScale };
+}
+
+function jumpToMario(): void {
+  if (lastState && client.active) viewer.jumpTo(toScene(lastState.pos));
+}
+
+// --- Stars and red coins -----------------------------------------------------
+// The bridge streams the level's active objects; the ones that are stars or
+// red coins get a badge in the scene and a row in the HUD (click = jump the
+// camera there). Star names come from the game's own text, read out of each
+// RDRAM snapshot. The object list arrives whenever ANY object moves, so the
+// scene and the HUD are only touched when what they show actually changed.
+let lastObjects: ObjectsMessage | null = null;
+let starNames: StarNames | null = null;
+let collectiblesKey = "";
+
+const STAR_SOURCE_NOTE: Record<StarSource, string> = {
+  star: "",
+  box: "in ! box",
+  redCoins: "red coins",
+  secrets: "secrets",
+};
+const STAR_SOURCE_TITLE: Record<StarSource, string> = {
+  star: "",
+  box: "Inside an exclamation box here",
+  redCoins: "Appears here once every red coin is collected",
+  secrets: "Appears here once every secret is found",
+};
+const at = (p: Vec3): string =>
+  `(${p.x.toFixed(0)}, ${p.y.toFixed(0)}, ${p.z.toFixed(0)})`;
+
+function syncCollectibles(): void {
+  const found = lastObjects
+    ? findCollectibles(lastObjects)
+    : { course: 0, stars: [], redCoins: [] };
+  const stars: JumpItem[] = found.stars.map((s) => {
+    const name =
+      s.starId === 6 ? "100 coins" : starNames?.actName(found.course, s.starId);
+    const label = `Star ${s.starId + 1}` + (name ? ` · ${name}` : "");
+    return {
+      label,
+      note: STAR_SOURCE_NOTE[s.source] || undefined,
+      // The label again: a long name is cut short in the list.
+      title: [label, STAR_SOURCE_TITLE[s.source], at(s.pos)].filter(Boolean).join("\n"),
+      pos: s.pos,
+    };
+  });
+  const redCoins: JumpItem[] = found.redCoins.map((c, i) => ({
+    label: `Red coin ${i + 1}`,
+    note: at(c.pos),
+    pos: c.pos,
+  }));
+  const key = JSON.stringify([worldScale, stars, redCoins]);
+  if (key === collectiblesKey) return;
+  collectiblesKey = key;
+  viewer.setMarkers("star", found.stars.map((s) => toScene(s.pos)));
+  viewer.setMarkers("redCoin", found.redCoins.map((c) => toScene(c.pos)));
+  hud.setJumpList("star", stars);
+  hud.setJumpList("redCoin", redCoins);
+  debug.collectibles = found;
+}
+
+/** Nothing is being read any more: don't leave another level's stars up. */
+function clearCollectibles(): void {
+  lastObjects = null;
+  syncCollectibles();
 }
 
 // Previous frame's Mario position, to tell whether he moved. When he didn't, the
@@ -437,6 +524,8 @@ const client = new LiveClient(bridgeUrl, {
       // that looks live.
       hud.setOracle(null);
       hud.setCaptureReady(false);
+      hud.setMarioAvailable(false);
+      clearCollectibles();
     }
   },
   onBridge: (attached, detail) => {
@@ -448,6 +537,8 @@ const client = new LiveClient(bridgeUrl, {
     } else {
       hud.setStatus(`connected — waiting for Project64 (${detail})`, false, true);
       hud.setOracle(null);
+      hud.setMarioAvailable(false);
+      clearCollectibles();
     }
     wasAttached = attached;
   },
@@ -505,6 +596,12 @@ const client = new LiveClient(bridgeUrl, {
       if (walk.wallThreshold !== null) walkThreshold = walk.wallThreshold;
     }
     debug.patchSignatures = sig;
+    // The hack's star names (static text, but a different ROM may be loaded).
+    // A snapshot taken before the text segment is in place keeps the old ones.
+    const names = readStarNames(bytes);
+    if (names) starNames = names;
+    debug.starNames = names;
+    syncCollectibles();
     snapshotSeen = true;
     applyProfile();
     runProbe(); // a probe held for the engine verdict can go now
@@ -525,9 +622,14 @@ const client = new LiveClient(bridgeUrl, {
     hud.setFogAvailable(model?.fog != null);
     debug.levelModel = model;
   },
+  onObjects: (objects) => {
+    lastObjects = objects;
+    syncCollectibles();
+  },
   onState: (state) => {
     lastState = state;
     hud.setCaptureReady(client.rawPool !== null);
+    hud.setMarioAvailable(true);
 
     const nextLevel = `${state.level}:${state.area}`;
     const levelChanged = nextLevel !== levelKey;
@@ -554,6 +656,7 @@ const client = new LiveClient(bridgeUrl, {
       }
     }
     viewer.setModelScale(worldScale);
+    syncCollectibles(); // badges sit in collision space: follow the scale
 
     // Direct observation of the selection rule, when the geometry under Mario
     // happens to expose it. Debounced: one frame's pos/pointer skew must not

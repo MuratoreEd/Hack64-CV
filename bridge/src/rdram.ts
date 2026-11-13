@@ -231,6 +231,58 @@ export function readState(rd: Rdram): GameState {
   };
 }
 
+// gObjectPool (US): 240 struct Object slots of 0x260 bytes. Offsets from
+// include/types.h; the layout and the address were checked against a running
+// hack (behaviour pointers resolve into segment 0x13, positions are sane).
+const OBJECTS = {
+  pool: 0x8033d488,
+  count: 240,
+  size: 0x260,
+  activeFlags: 0x74, // s16; bit 0 = ACTIVE_FLAG_ACTIVE
+  pos: 0xa0, // oPosX/Y/Z, f32 x3
+  behParams: 0x188, // oBehParams, u32
+  behavior: 0x20c, // const BehaviorScript* (KSEG0)
+} as const;
+const US_SEGMENT_TABLE = 0x8033b400; // uintptr_t[32], physical offsets
+const US_CURR_COURSE_NUM = 0x8033bac6; // s16
+const BEHAVIOR_SEGMENT = 0x13;
+
+export interface ObjectPoolState {
+  course: number;
+  behaviorBase: number;
+  /** [slot, behavior, x, y, z, behParams] per active slot. */
+  objects: [number, number, number, number, number, number][];
+}
+
+/** The active objects, read in one go so a slot's fields belong together.
+ * Positions are rounded to 1/100 unit: nothing downstream needs more, and an
+ * object jittering in the last float bits must not re-send the list. */
+export function readObjects(rd: Rdram): ObjectPoolState {
+  const b = rd.readBytes(OBJECTS.pool, OBJECTS.count * OBJECTS.size);
+  const objects: ObjectPoolState["objects"] = [];
+  const coord = (off: number): number => {
+    const v = b.readFloatBE(off);
+    return Number.isFinite(v) ? Math.round(v * 100) / 100 : 0;
+  };
+  for (let slot = 0; slot < OBJECTS.count; slot++) {
+    const o = slot * OBJECTS.size;
+    if ((b.readInt16BE(o + OBJECTS.activeFlags) & 1) === 0) continue;
+    objects.push([
+      slot,
+      b.readUInt32BE(o + OBJECTS.behavior),
+      coord(o + OBJECTS.pos),
+      coord(o + OBJECTS.pos + 4),
+      coord(o + OBJECTS.pos + 8),
+      b.readUInt32BE(o + OBJECTS.behParams),
+    ]);
+  }
+  return {
+    course: rd.s16(US_CURR_COURSE_NUM),
+    behaviorBase: rd.u32(US_SEGMENT_TABLE + BEHAVIOR_SEGMENT * 4),
+    objects,
+  };
+}
+
 export interface SurfacePool {
   count: number;
   poolBase: number;

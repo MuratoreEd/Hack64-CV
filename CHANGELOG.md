@@ -47,6 +47,18 @@ Versions follow [semver](https://semver.org/). The version lives in
 - The HUD shows which commit a build came from next to the version
   (`v1.2.0 · abc1234`; `+` = built with uncommitted changes, `dev` = running
   from source), so an out-of-date exe can be recognised.
+- **Jump to Mario**: a HUD button (and the `M` key) that moves the camera to
+  Mario, keeping the direction it faces.
+- **Stars and red coins**: the bridge streams the level's active objects
+  (`ObjectsMessage`), and the ones that are stars or red coins
+  (`src/objects/collectibles.ts`, recognised by behaviour script) get a badge
+  in the scene, a toggle each, and a list in the HUD — click an entry to jump
+  the camera there. Stars are listed with their number, how they are obtained
+  (placed, in an exclamation box, red coins, secrets) and the hack's own star
+  name, read from the game's text segment (`src/objects/starNames.ts`). Only
+  what the game has loaded can be listed: the current area's objects for the
+  current act, and a boss or race star only once it has spawned. Collected red
+  coins drop off the list.
 
 ### Fixed
 

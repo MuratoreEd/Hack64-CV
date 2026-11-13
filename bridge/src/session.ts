@@ -18,6 +18,7 @@ import {
   discoverRdram,
   readState,
   readSurfacePool,
+  readObjects,
   readRdramSnapshot,
   type Rdram,
   type SurfacePool,
@@ -59,6 +60,12 @@ export function startBridgeSession(wss: WebSocketServer): () => void {
   let lastPoolJson: string | null = null;
   // Viewers that were skipped when the pool last changed.
   const behind = new WeakSet<WebSocket>();
+  // The object list as last broadcast (serialized), and the viewers that
+  // missed it. Compared as text: it is small, and "changed" is all we ask.
+  let lastObjectsJson: string | null = null;
+  const behindObjects = new WeakSet<WebSocket>();
+  const objectsJson = (rd: Rdram): string =>
+    JSON.stringify({ type: "objects", ...readObjects(rd) });
 
   const send = (ws: WebSocket, msg: ServerMessage): void => {
     if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg));
@@ -119,6 +126,7 @@ export function startBridgeSession(wss: WebSocketServer): () => void {
       attached = { proc, rd };
       lastPool = null; // force a fresh surface send to every viewer
       lastPoolJson = null;
+      lastObjectsJson = null;
       console.log(
         `Attached to Project64 (pid ${pid}); RDRAM base 0x${rd.base.toString(16)}, byte order "${rd.order}".`,
       );
@@ -164,6 +172,7 @@ export function startBridgeSession(wss: WebSocketServer): () => void {
         const json = currentPoolJson(attached.rd);
         if (json) ws.send(json);
         send(ws, { type: "state", ...readState(attached.rd) });
+        ws.send(objectsJson(attached.rd));
       } catch (err) {
         detach((err as Error).message);
       }
@@ -203,9 +212,11 @@ export function startBridgeSession(wss: WebSocketServer): () => void {
     if (!ensureAttached() || !attached) return;
     let pool: SurfacePool | null;
     let stateJson: string;
+    let objJson: string;
     try {
       pool = readSurfacePool(attached.rd);
       stateJson = JSON.stringify({ type: "state", ...readState(attached.rd) });
+      objJson = objectsJson(attached.rd);
     } catch (err) {
       // An unreadable pool mid-load is not an error (readSurfacePool says
       // null); a failed read is.
@@ -216,6 +227,8 @@ export function startBridgeSession(wss: WebSocketServer): () => void {
     const changed =
       pool !== null && (lastPool === null || !lastPool.bytes.equals(pool.bytes));
     if (changed && pool) setPool(pool);
+    const objectsChanged = objJson !== lastObjectsJson;
+    lastObjectsJson = objJson;
     for (const ws of wss.clients) {
       if (ws.readyState !== WebSocket.OPEN) continue;
       const congested = ws.bufferedAmount > MAX_BUFFERED_BYTES;
@@ -229,6 +242,13 @@ export function startBridgeSession(wss: WebSocketServer): () => void {
         }
       }
       if (!congested) ws.send(stateJson);
+      if (objectsChanged || behindObjects.has(ws)) {
+        if (congested) behindObjects.add(ws);
+        else {
+          ws.send(objJson);
+          behindObjects.delete(ws);
+        }
+      }
     }
   }, STATE_INTERVAL_MS);
 

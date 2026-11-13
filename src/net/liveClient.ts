@@ -1,7 +1,12 @@
 // Browser-side WebSocket client for the Project64 bridge. Parses the streamed
 // surface pool with the collision core and forwards state to the viewer.
 
-import type { ServerMessage, StateMessage, ClientMessage } from "./protocol";
+import type {
+  ServerMessage,
+  StateMessage,
+  ClientMessage,
+  ObjectsMessage,
+} from "./protocol";
 import { parseSurfacePool } from "../collision/surface";
 import type { Surface } from "../collision/surface";
 
@@ -15,6 +20,8 @@ export interface LiveHandlers {
   onRdram(bytes: Uint8Array): void;
   /** Whether the bridge currently has Project64 (and if not, why). */
   onBridge?(attached: boolean, detail: string): void;
+  /** The active objects in the level (stars, red coins, everything else). */
+  onObjects?(objects: ObjectsMessage): void;
 }
 
 /** How long after losing an established connection before trying again. */
@@ -149,6 +156,10 @@ export class LiveClient {
       this.handlers.onRdram(new Uint8Array(base64ToArrayBuffer(msg.base64)));
     } else if (msg.type === "bridge") {
       this.handlers.onBridge?.(msg.attached, msg.detail);
+    } else if (msg.type === "objects") {
+      // A bridge from before this message existed never sends it; one that
+      // sends something malformed must not take the message loop down.
+      if (Array.isArray(msg.objects)) this.handlers.onObjects?.(msg);
     }
   }
 

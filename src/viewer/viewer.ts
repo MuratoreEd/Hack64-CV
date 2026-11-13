@@ -34,6 +34,9 @@ export interface AnomalyBox {
   yHigh: number;
 }
 
+/** Things in the level worth finding, drawn as fixed-size screen badges. */
+export type MarkerKind = "star" | "redCoin";
+
 export interface ViewerOptions {
   zFlip?: boolean;
 }
@@ -77,6 +80,15 @@ export class Viewer {
     [SurfaceKind.Ceiling]: true,
   };
   private marioMarker: THREE.Sprite | null = null;
+  // Star / red-coin badges: one sprite per object, one shared material per
+  // kind. Unlike Mario's badge they keep a constant size ON SCREEN, so they
+  // can be spotted from the far side of the level, and they draw through
+  // geometry for the same reason.
+  private markerGroups: Record<MarkerKind, THREE.Group> = {
+    star: new THREE.Group(),
+    redCoin: new THREE.Group(),
+  };
+  private markerMaterials: Partial<Record<MarkerKind, THREE.SpriteMaterial>> = {};
   private zFlip: boolean;
   // Camera framing is explicit: the last derived bounds are kept so main.ts
   // can reframe() on a real level/area change, while mid-level geometry
@@ -167,6 +179,7 @@ export class Viewer {
     this.helpers.visible = false; // grid & axes off by default (HUD toggle)
     this.anomalyGroup.renderOrder = 2;
     this.scene.add(this.anomalyGroup);
+    for (const g of Object.values(this.markerGroups)) this.scene.add(g);
     for (const k of ANOMALY_KINDS) {
       this.anomalyKindVisible.set(k, true);
       this.anomalyKindColor.set(k, ANOMALY_KIND_COLOR[k]);
@@ -845,6 +858,43 @@ export class Viewer {
     this.needsRender = true;
   }
 
+  /** Replace a kind's badges. Positions are collision-space, like Mario's. */
+  setMarkers(kind: MarkerKind, points: { x: number; y: number; z: number }[]): void {
+    const group = this.markerGroups[kind];
+    group.clear(); // sprites share one geometry and the kind's material
+    if (points.length > 0) {
+      const material = (this.markerMaterials[kind] ??= markerMaterial(kind));
+      const zs = this.zFlip ? -1 : 1;
+      for (const p of points) {
+        const sprite = new THREE.Sprite(material);
+        sprite.position.set(p.x, p.y, p.z * zs);
+        sprite.scale.setScalar(MARKER_SIZE[kind]);
+        sprite.renderOrder = 3; // over the anomaly boxes, under Mario
+        group.add(sprite);
+      }
+    }
+    this.needsRender = true;
+  }
+
+  setMarkersVisible(kind: MarkerKind, visible: boolean): void {
+    this.markerGroups[kind].visible = visible;
+    this.needsRender = true;
+  }
+
+  /** Move the camera to look at a point (collision space) from close by,
+   * keeping the direction it already faces: the point lands in the middle of
+   * the view, `JUMP_DISTANCE` world units ahead. */
+  jumpTo(pos: { x: number; y: number; z: number }): void {
+    const zs = this.zFlip ? -1 : 1;
+    const target = new THREE.Vector3(pos.x, pos.y, pos.z * zs);
+    this.camera.updateMatrixWorld();
+    const forward = this.camera.getWorldDirection(new THREE.Vector3());
+    this.camera.position.copy(
+      target.addScaledVector(forward, -JUMP_DISTANCE / this.modelScale),
+    );
+    this.needsRender = true;
+  }
+
   private rebuildHelpers(b: LevelBounds): void {
     // Dispose before dropping: once rendered, the renderer keeps a helper's GPU
     // buffers until dispose() — clearing alone leaked them on every rebuild.
@@ -1003,6 +1053,57 @@ export class Viewer {
     if (this.skyboxGroup) this.skyboxGroup.position.copy(this.camera.position);
     this.renderer.render(this.scene, this.camera);
   }
+}
+
+/** How far back a jump leaves the camera, in world units (Mario is 160 tall;
+ * the game's own camera sits about this far behind him). */
+const JUMP_DISTANCE = 800;
+
+/** Badge height as a fraction of the view (sizeAttenuation off: a sprite of
+ * scale s spans s / (2 tan(fov/2)) of the viewport height at any distance). */
+const MARKER_SIZE: Record<MarkerKind, number> = { star: 0.036, redCoin: 0.026 };
+
+/** A star or a red coin, drawn on a canvas once per kind. */
+function markerMaterial(kind: MarkerKind): THREE.SpriteMaterial {
+  const canvas = document.createElement("canvas");
+  canvas.width = canvas.height = 128;
+  const g = canvas.getContext("2d")!;
+  g.lineJoin = "round";
+  if (kind === "star") {
+    g.beginPath();
+    for (let i = 0; i < 10; i++) {
+      const r = i % 2 === 0 ? 58 : 25;
+      const a = (i * Math.PI) / 5 - Math.PI / 2;
+      g.lineTo(64 + r * Math.cos(a), 66 + r * Math.sin(a));
+    }
+    g.closePath();
+    g.fillStyle = "#ffd21f";
+    g.fill();
+    g.lineWidth = 8;
+    g.strokeStyle = "#5a3d00";
+    g.stroke();
+  } else {
+    g.beginPath();
+    g.arc(64, 64, 52, 0, Math.PI * 2);
+    g.fillStyle = "#e0241b";
+    g.fill();
+    g.lineWidth = 9;
+    g.strokeStyle = "#5c0a06";
+    g.stroke();
+    g.beginPath();
+    g.arc(64, 64, 30, 0, Math.PI * 2);
+    g.lineWidth = 7;
+    g.strokeStyle = "#ff9d8f";
+    g.stroke();
+  }
+  const map = new THREE.CanvasTexture(canvas);
+  map.colorSpace = THREE.SRGBColorSpace;
+  return new THREE.SpriteMaterial({
+    map,
+    depthTest: false,
+    fog: false,
+    sizeAttenuation: false,
+  });
 }
 
 const FLY_KEYS = new Set([

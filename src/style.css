@@ -32,6 +32,84 @@ canvas {
   font-size: 13px;
   backdrop-filter: blur(4px);
   user-select: none;
+  /* The panel can outgrow a small window (star and red-coin lists). */
+  max-height: calc(100% - 24px);
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: #363b4a transparent;
+}
+
+/* Camera-to-Mario: a quiet button under the position readout. */
+.hud button.jump-mario {
+  margin: 0 0 6px;
+  padding: 4px 8px;
+  background: #2a2e3a;
+  color: #c2c6d2;
+  font-size: 11px;
+}
+
+.hud button.jump-mario:hover {
+  background: #363b4a;
+}
+
+/* Star / red-coin legend swatches, echoing the badges in the scene. */
+.hud .swatch.marker-star {
+  background: #ffd21f;
+  border-radius: 0;
+  clip-path: polygon(
+    50% 0, 62% 36%, 100% 38%, 70% 60%, 80% 100%,
+    50% 76%, 20% 100%, 30% 60%, 0 38%, 38% 36%
+  );
+}
+
+.hud .swatch.marker-redCoin {
+  background: #e0241b;
+  border-radius: 50%;
+}
+
+/* Jump lists: one compact row per star / red coin, scrolling past ~6 rows. */
+.hud .jump-list {
+  max-width: 300px;
+  max-height: 132px;
+  margin: 0 0 4px 20px;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: #363b4a transparent;
+}
+
+.hud .jump-list button {
+  display: flex;
+  gap: 6px;
+  align-items: baseline;
+  margin: 0;
+  padding: 2px 6px;
+  background: none;
+  color: #c2c6d2;
+  border-radius: 4px;
+  font-size: 11px;
+  text-align: left;
+}
+
+/* A hack's star names can be long: the list must not widen the whole panel.
+   The full text is in the row's tooltip. */
+.hud .jump-list button > span:first-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hud .jump-list button:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: #fff;
+}
+
+.hud .jump-list .note {
+  margin-left: auto;
+  padding-left: 8px;
+  color: #6b7080;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 .hud h1 {
