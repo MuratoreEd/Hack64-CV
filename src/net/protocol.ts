@@ -61,13 +61,16 @@ export interface BridgeMessage {
 }
 
 /** One live object slot: `[slot, behavior, x, y, z, behParams, model,
- * interact]`. `behavior` is the KSEG0 address of the object's behaviour script
- * (Object.behavior), the position is in world units, `behParams` is the raw
- * u32 (oBehParams). `model` is the graph node it is drawn with
- * (header.gfx.sharedChild, KSEG0; 0 = none) and `interact` its oInteractType —
- * what it looks like and what touching it does, to tell a fake star from a
- * real one. The last two are missing from bridges older than 1.2.0. */
-export type ObjectRecord = [number, number, number, number, number, number, number?, number?];
+ * interact, gfxFlags]`. `behavior` is the KSEG0 address of the object's
+ * behaviour script (Object.behavior), the position is in world units,
+ * `behParams` is the raw u32 (oBehParams). `model` is the graph node attached
+ * to it (header.gfx.sharedChild, KSEG0; 0 = none), `gfxFlags` whether that is
+ * drawn at all (header.gfx.node.flags, GRAPH_RENDER_*), `interact` its
+ * oInteractType — what it looks like and what touching it does, to tell a
+ * fake star from a real one. The last three are missing from older bridges. */
+export type ObjectRecord = [
+  number, number, number, number, number, number, number?, number?, number?,
+];
 
 /** The active objects in gObjectPool. The bridge stays ignorant of what any of
  * them are: the viewer picks out stars and red coins by behaviour script

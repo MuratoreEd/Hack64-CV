@@ -84,9 +84,6 @@ const STAR_GIVERS: StarGiver[] = [
 ];
 const GIVER_BY_BHV = new Map(STAR_GIVERS.map((g) => [g.bhv, g]));
 
-/** Model id of the star (gLoadedGraphNodes index) — what a level script's
- * OBJECT command names, and what a fake star wears. */
-export const MODEL_STAR = 0x7a;
 /** oInteractType bit of a star or key pickup (INTERACT_STAR_OR_KEY). */
 export const INTERACT_STAR_OR_KEY = 0x1000;
 /** The highest star index a save file keeps: a course has seven star bits
@@ -97,8 +94,8 @@ export const LAST_STAR_INDEX = 6;
 /** Why something listed with the stars is not a real one. Troll stars:
  * - "badId": a genuine star object, but its number is past the seven a course
  *   has, so collecting it plays the whole star cutscene and saves nothing.
- * - "lookalike": an object wearing the star model that isn't a star pickup
- *   at all (decoration, or something that hurts). */
+ * - "lookalike": an object drawn as a star that isn't a star pickup at all
+ *   (decoration, or something that hurts). Only judged live. */
 export type FakeStar = "badId" | "lookalike";
 
 /** The star index a star object saves to: interact_star_or_key reads
@@ -190,19 +187,33 @@ export function classifyStar(
   return null;
 }
 
-/** An object no behaviour rule calls a star but that wears the star model:
- * what touching it does decides. A star pickup under a hack's own behaviour
- * is a real star; anything else is a lookalike. `interact` undefined (not
- * known: a placement that hasn't loaded) counts as a lookalike. */
+/** GraphNode flags: drawn at all (GRAPH_RENDER_ACTIVE), and hidden
+ * (GRAPH_RENDER_INVISIBLE, cur_obj_hide). */
+const GRAPH_RENDER_ACTIVE = 0x01;
+const GRAPH_RENDER_INVISIBLE = 0x10;
+
+/** An object no behaviour rule calls a star but that has the star model
+ * attached. A star pickup under a hack's own behaviour is a real star. One
+ * that isn't a pickup is a lookalike only if the game actually DRAWS the
+ * star: hacks routinely give invisible controller objects (fire bars,
+ * spawners) the star model as a placeholder — the placement needs some model,
+ * and the star is the one that shows up in a level editor — and those never
+ * render it. Seen live 2026-11-17: three fire bars with the star model and
+ * GRAPH_RENDER_ACTIVE off. Unknown flags (an older bridge) never flag. */
 function starModelObject(
   behParams: number,
   interact: number | undefined,
-): { starId: number; source: StarSource; giver?: string; fake?: FakeStar } {
+  gfxFlags: number | undefined,
+): { starId: number; source: StarSource; giver?: string; fake?: FakeStar } | null {
   const starId = starIndex(behParams);
   if (interact !== undefined && (interact & INTERACT_STAR_OR_KEY) !== 0) {
     return starId > LAST_STAR_INDEX ? { starId, source: "star", fake: "badId" } : { starId, source: "star" };
   }
-  return { starId, source: "star", fake: "lookalike" };
+  const drawn =
+    gfxFlags !== undefined &&
+    (gfxFlags & GRAPH_RENDER_ACTIVE) !== 0 &&
+    (gfxFlags & GRAPH_RENDER_INVISIBLE) === 0;
+  return drawn ? { starId, source: "star", fake: "lookalike" } : null;
 }
 
 /** Stars (by star index, then slot), red coins and secrets (by slot) among
@@ -215,7 +226,7 @@ export function findCollectibles(msg: ObjectsMessage): Collectibles {
   const secrets: PointObject[] = [];
   for (const rec of msg.objects) {
     if (!Array.isArray(rec) || rec.length < 6) continue;
-    const [slot, behavior, x, y, z, behParams, model, interact] = rec;
+    const [slot, behavior, x, y, z, behParams, model, interact, gfxFlags] = rec;
     if (![x, y, z].every(Number.isFinite)) continue;
     const bhv = segmentedBehavior(behavior >>> 0, msg.behaviorBase);
     const pos = { x, y, z };
@@ -224,7 +235,9 @@ export function findCollectibles(msg: ObjectsMessage): Collectibles {
     else {
       const star =
         classifyStar(bhv, behParams) ??
-        (msg.starModel && model === msg.starModel ? starModelObject(behParams, interact) : null);
+        (msg.starModel && model === msg.starModel
+          ? starModelObject(behParams, interact, gfxFlags)
+          : null);
       if (star) stars.push({ slot, pos, ...star });
     }
   }
@@ -265,11 +278,10 @@ export interface AbsentStar extends PlacedStar {
 export function placedStars(objects: ScriptObject[]): PlacedStar[] {
   const byKey = new Map<string, PlacedStar>();
   for (const o of objects) {
-    // A placement says what model, not what touching it does: a star-model
-    // object that no rule recognises is listed as a lookalike until it loads.
-    const star =
-      classifyStar(o.behavior, o.behParams) ??
-      (o.model === MODEL_STAR ? starModelObject(o.behParams, undefined) : null);
+    // A placement's model says nothing on its own: placeholder star models on
+    // invisible objects are common (see starModelObject). Lookalikes are only
+    // judged live, where the game says whether the model is drawn.
+    const star = classifyStar(o.behavior, o.behParams);
     if (!star) continue;
     const key = [o.area, o.pos.x, o.pos.y, o.pos.z, star.starId, star.source, star.giver, star.fake].join("|");
     const seen = byKey.get(key);
@@ -287,8 +299,7 @@ export function placedStars(objects: ScriptObject[]): PlacedStar[] {
  * present when ANY real live star has its number: the box has been opened and
  * the star is in the air, the boss is beaten and the star has spawned. Fakes
  * share numbers (or have none that matters) and stay put, so one counts as
- * present when any live star stands on its spot — which also settles a
- * placement guessed a lookalike that turned out, loaded, to be a real star. */
+ * present when any live star stands on its spot. */
 export function absentStars(
   placed: PlacedStar[],
   live: StarObject[],

@@ -330,13 +330,8 @@ const FAKE_TITLE: Record<FakeStar, (starId: number) => string> = {
     `Troll star: a real star object, but numbered ${starId + 1} — a course ` +
     `only has stars 1-7. Collecting it plays the star cutscene and saves nothing.`,
   lookalike: () =>
-    "Troll star: wears the star model, but touching it is not a star pickup.",
+    "Troll star: drawn as a star, but touching it is not a star pickup.",
 };
-/** For a lookalike placed in a part of the level that isn't loaded: what
- * touching it does can only be read once it is. */
-const LOOKALIKE_UNLOADED =
-  "Wears the star model, and isn't any star object this viewer knows. What " +
-  "touching it does is checked once it is loaded.";
 
 function syncCollectibles(): void {
   const found = lastObjects
@@ -372,10 +367,7 @@ function syncCollectibles(): void {
     const how = s.fake ? undefined : s.giver ?? STAR_SOURCE_NOTE[s.source];
     const where =
       s.reason === "area" ? `area ${s.area}` : s.reason === "act" ? actsLabel(s.acts) : "gone";
-    const fakeTitle =
-      s.fake === "lookalike" && s.reason !== "gone"
-        ? LOOKALIKE_UNLOADED
-        : s.fake && FAKE_TITLE[s.fake](s.starId);
+    const fakeTitle = s.fake && FAKE_TITLE[s.fake](s.starId);
     const item: JumpItem = {
       label,
       note: s.fake ? `fake · ${where}` : where,

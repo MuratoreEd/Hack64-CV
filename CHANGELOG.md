@@ -73,11 +73,14 @@ Versions follow [semver](https://semver.org/). The version lives in
   asked for. Macro objects and compressed segments are not read.
 - **Troll stars** are listed last, struck through, with a grey crossed-out
   badge: a real star object whose number is past the seven a course saves
-  (collecting it plays the cutscene and counts for nothing), and an object
-  wearing the star model that isn't a star pickup. The bridge now sends each
-  object's model and interaction type for the second check; a hack's own star
-  behaviour that *is* a star pickup is listed as a real star. Star numbers are
-  read the way the game saves them (`(behParams >> 24) & 0x1F`).
+  (collecting it plays the cutscene and counts for nothing), and an object the
+  game *draws* as a star that isn't a star pickup. The bridge now sends each
+  object's model, render flags and interaction type for the second check; a
+  hack's own star behaviour that *is* a star pickup is listed as a real star.
+  Only drawn objects count: hacks give invisible objects (fire bars,
+  spawners) the star model as a placeholder, and those are not flagged — so
+  lookalikes are judged live only, never from the level script. Star numbers
+  are read the way the game saves them (`(behParams >> 24) & 0x1F`).
 
 ### Fixed
 
