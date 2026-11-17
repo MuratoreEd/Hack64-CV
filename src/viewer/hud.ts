@@ -71,10 +71,13 @@ export interface JumpItem {
   pos?: { x: number; y: number; z: number };
   /** Draw the row dimmed: it is about something that is not there now. */
   dim?: boolean;
+  /** A troll star: marked as such, and left out of the count. */
+  fake?: boolean;
 }
 
-/** The kinds that get a HUD row (an absent star is a row of the Stars list). */
-export type JumpListKind = Exclude<MarkerKind, "starAbsent">;
+/** The kinds that get a HUD row (absent and fake stars are rows of the Stars
+ * list). */
+export type JumpListKind = Exclude<MarkerKind, "starAbsent" | "starFake">;
 
 const MARKER_LABEL: Record<JumpListKind, string> = {
   star: "Stars",
@@ -401,7 +404,10 @@ export function createHud(
     list.style.display = "none";
     box.addEventListener("change", () => {
       viewer.setMarkersVisible(kind, box.checked);
-      if (kind === "star") viewer.setMarkersVisible("starAbsent", box.checked);
+      if (kind === "star") {
+        viewer.setMarkersVisible("starAbsent", box.checked);
+        viewer.setMarkersVisible("starFake", box.checked);
+      }
       list.style.display = box.checked && list.childElementCount > 0 ? "" : "none";
     });
     hud.append(row, list);
@@ -661,7 +667,8 @@ export function createHud(
     setJumpList(kind, items) {
       const { row, count, list, box } = jumpRows[kind];
       row.style.display = items.length > 0 ? "" : "none";
-      count.textContent = String(items.length);
+      const fakes = items.filter((i) => i.fake).length;
+      count.textContent = String(items.length - fakes) + (fakes ? ` + ${fakes} fake` : "");
       list.replaceChildren(
         ...items.map((item) => {
           const b = document.createElement("button");
@@ -676,6 +683,7 @@ export function createHud(
           }
           if (item.title) b.title = item.title;
           if (item.dim) b.classList.add("dim");
+          if (item.fake) b.classList.add("fake");
           const pos = item.pos;
           if (!pos) b.disabled = true;
           else {

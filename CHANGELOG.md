@@ -71,6 +71,13 @@ Versions follow [semver](https://semver.org/). The version lives in
   list only in the ROM, the bridge reads that range from the ROM image in
   Project64's memory (`bridge/src/rom.ts`, `{type:"rom"}`), so no ROM file is
   asked for. Macro objects and compressed segments are not read.
+- **Troll stars** are listed last, struck through, with a grey crossed-out
+  badge: a real star object whose number is past the seven a course saves
+  (collecting it plays the cutscene and counts for nothing), and an object
+  wearing the star model that isn't a star pickup. The bridge now sends each
+  object's model and interaction type for the second check; a hack's own star
+  behaviour that *is* a star pickup is listed as a real star. Star numbers are
+  read the way the game saves them (`(behParams >> 24) & 0x1F`).
 
 ### Fixed
 

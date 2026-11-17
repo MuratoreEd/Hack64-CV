@@ -36,6 +36,7 @@ import {
   findCollectibles,
   placedStars,
   type AbsentStar,
+  type FakeStar,
   type PlacedStar,
   type StarSource,
 } from "./objects/collectibles";
@@ -324,24 +325,42 @@ const STAR_SOURCE_TITLE: Record<StarSource, string> = {
 const at = (p: Vec3): string =>
   `(${p.x.toFixed(0)}, ${p.y.toFixed(0)}, ${p.z.toFixed(0)})`;
 
+const FAKE_TITLE: Record<FakeStar, (starId: number) => string> = {
+  badId: (starId) =>
+    `Troll star: a real star object, but numbered ${starId + 1} — a course ` +
+    `only has stars 1-7. Collecting it plays the star cutscene and saves nothing.`,
+  lookalike: () =>
+    "Troll star: wears the star model, but touching it is not a star pickup.",
+};
+/** For a lookalike placed in a part of the level that isn't loaded: what
+ * touching it does can only be read once it is. */
+const LOOKALIKE_UNLOADED =
+  "Wears the star model, and isn't any star object this viewer knows. What " +
+  "touching it does is checked once it is loaded.";
+
 function syncCollectibles(): void {
   const found = lastObjects
     ? findCollectibles(lastObjects)
     : { course: 0, stars: [], redCoins: [], secrets: [] };
-  const starLabel = (starId: number): string => {
-    const name = starId === 6 ? "100 coins" : starNames?.actName(found.course, starId);
-    return `Star ${starId + 1}` + (name ? ` · ${name}` : "");
+  const starLabel = (s: { starId: number; fake?: FakeStar }): string => {
+    if (s.fake === "lookalike") return "Fake star";
+    if (s.fake === "badId") return `Fake star · ID ${s.starId + 1}`;
+    const name = s.starId === 6 ? "100 coins" : starNames?.actName(found.course, s.starId);
+    return `Star ${s.starId + 1}` + (name ? ` · ${name}` : "");
   };
   const liveRows = found.stars.map((s) => {
-    const label = starLabel(s.starId);
+    const label = starLabel(s);
     const item: JumpItem = {
       label,
-      note: s.giver ?? (STAR_SOURCE_NOTE[s.source] || undefined),
+      note: s.fake ? "fake" : s.giver ?? (STAR_SOURCE_NOTE[s.source] || undefined),
       // The label again: a long name is cut short in the list.
-      title: [label, STAR_SOURCE_TITLE[s.source], at(s.pos)].filter(Boolean).join("\n"),
+      title: [label, s.fake ? FAKE_TITLE[s.fake](s.starId) : STAR_SOURCE_TITLE[s.source], at(s.pos)]
+        .filter(Boolean)
+        .join("\n"),
       pos: s.pos,
+      fake: !!s.fake,
     };
-    return { starId: s.starId, item };
+    return { starId: s.starId, fake: !!s.fake, item };
   });
   // Stars the level places that are not loaded right now.
   const absent =
@@ -349,25 +368,32 @@ function syncCollectibles(): void {
       ? absentStars(levelPlaced, found.stars, lastState.area, lastObjects.act ?? 0)
       : [];
   const absentRows = absent.map((s) => {
-    const label = starLabel(s.starId);
-    const how = s.giver ?? STAR_SOURCE_NOTE[s.source];
+    const label = starLabel(s);
+    const how = s.fake ? undefined : s.giver ?? STAR_SOURCE_NOTE[s.source];
+    const where =
+      s.reason === "area" ? `area ${s.area}` : s.reason === "act" ? actsLabel(s.acts) : "gone";
+    const fakeTitle =
+      s.fake === "lookalike" && s.reason !== "gone"
+        ? LOOKALIKE_UNLOADED
+        : s.fake && FAKE_TITLE[s.fake](s.starId);
     const item: JumpItem = {
       label,
-      note:
-        s.reason === "area" ? `area ${s.area}` : s.reason === "act" ? actsLabel(s.acts) : "gone",
-      title: [label, ABSENT_TITLE[s.reason], how && `From: ${how}`, at(s.pos)]
+      note: s.fake ? `fake · ${where}` : where,
+      title: [label, fakeTitle, ABSENT_TITLE[s.reason], how && `From: ${how}`, at(s.pos)]
         .filter(Boolean)
         .join("\n"),
       // Another area's coordinates mean nothing in the scene on screen.
       pos: s.reason === "area" ? undefined : s.pos,
       dim: true,
+      fake: !!s.fake,
     };
-    return { starId: s.starId, item };
+    return { starId: s.starId, fake: !!s.fake, item };
   });
-  // One list in star order; a loaded star before an absent one of its number.
+  // One list in star order, fakes last; a loaded star before an absent one
+  // of its number.
   const stars: JumpItem[] = [...liveRows, ...absentRows]
     .map((row, i) => ({ ...row, i }))
-    .sort((a, b) => a.starId - b.starId || a.i - b.i)
+    .sort((a, b) => +a.fake - +b.fake || a.starId - b.starId || a.i - b.i)
     .map((row) => row.item);
   const redCoins: JumpItem[] = found.redCoins.map((c, i) => ({
     label: `Red coin ${i + 1}`,
@@ -382,10 +408,17 @@ function syncCollectibles(): void {
   const key = JSON.stringify([worldScale, stars, redCoins, secrets]);
   if (key === collectiblesKey) return;
   collectiblesKey = key;
-  viewer.setMarkers("star", found.stars.map((s) => toScene(s.pos)));
+  viewer.setMarkers("star", found.stars.filter((s) => !s.fake).map((s) => toScene(s.pos)));
   viewer.setMarkers(
     "starAbsent",
-    absent.filter((s) => s.reason !== "area").map((s) => toScene(s.pos)),
+    absent.filter((s) => !s.fake && s.reason !== "area").map((s) => toScene(s.pos)),
+  );
+  // A fake that was touched is gone for good: nothing to mark.
+  viewer.setMarkers(
+    "starFake",
+    [...found.stars, ...absent.filter((s) => s.reason === "act")]
+      .filter((s) => s.fake)
+      .map((s) => toScene(s.pos)),
   );
   viewer.setMarkers("redCoin", found.redCoins.map((c) => toScene(c.pos)));
   viewer.setMarkers("secret", found.secrets.map((c) => toScene(c.pos)));

@@ -1,11 +1,15 @@
 import { describe, it, expect } from "vitest";
 import {
   BHV,
+  INTERACT_STAR_OR_KEY,
+  MODEL_STAR,
   absentStars,
   boxStarId,
+  classifyStar,
   findCollectibles,
   placedStars,
   segmentedBehavior,
+  starIndex,
 } from "./collectibles";
 import type { ScriptObject } from "./levelScript";
 import type { ObjectsMessage, ObjectRecord } from "../net/protocol";
@@ -152,6 +156,44 @@ describe("findCollectibles", () => {
     ]);
   });
 
+  it("flags troll stars: a star numbered past 7, and the star model on a non-star", () => {
+    // Live, 2026-11-17: four bhvStar with star index 8 ("star 9"), three
+    // star-model decorations (bhv 0x13001108, no interaction), the red-coin
+    // star's transparent marker (another model: not a star) and a real box.
+    const STAR_MODEL = 0x80100b9c;
+    const msg: ObjectsMessage = {
+      ...message([
+        [103, virt(BHV.star), -17907, 1201, 500, 0x08000000, STAR_MODEL, INTERACT_STAR_OR_KEY],
+        [42, virt(0x13001108), -11065, 5678, -18435, 0, STAR_MODEL, 0],
+        [115, virt(0x1300556c), -1409, -1840, -12793, 0, 0x80100c00, 0],
+        [88, virt(BHV.exclamationBox), -10527, 11632, 265, 0x000a0000, 0x8015fa78, 0x200],
+        // A hack's own star behaviour: star model, star pickup — a real star.
+        [7, virt(0x13009000), 1, 2, 3, 0x02000000, STAR_MODEL, INTERACT_STAR_OR_KEY],
+        // The game masks the number with 0x1F: 0x21 is star 2, not star 34.
+        [8, virt(BHV.star), 4, 5, 6, 0x21000000, STAR_MODEL, INTERACT_STAR_OR_KEY],
+      ]),
+      starModel: STAR_MODEL,
+    };
+    expect(findCollectibles(msg).stars.map((s) => [s.slot, s.starId, s.fake])).toEqual([
+      [8, 1, undefined],
+      [88, 1, undefined],
+      [7, 2, undefined],
+      [42, 0, "lookalike"],
+      [103, 8, "badId"],
+    ]);
+    // A bridge that sends no model knows no lookalikes; the number rule holds.
+    const old = findCollectibles({ ...msg, starModel: undefined });
+    expect(old.stars.map((s) => [s.slot, s.fake])).toEqual([
+      [8, undefined],
+      [88, undefined],
+      [103, "badId"],
+    ]);
+    expect(starIndex(0xe7000000)).toBe(7);
+    expect(classifyStar(BHV.star, 0x06000000)?.fake).toBeUndefined(); // 100-coin bit
+    expect(classifyStar(BHV.star, 0x07000000)?.fake).toBe("badId");
+    expect(classifyStar(0x130001f4, 0x09000000)?.fake).toBe("badId"); // a boss too
+  });
+
   it("ignores everything else, and records it can't use", () => {
     const found = findCollectibles(
       message([
@@ -176,7 +218,8 @@ describe("placedStars / absentStars", () => {
   ): ScriptObject => ({
     area,
     acts,
-    model: 0x7a,
+    model: 0x01, // not the star model: that has a meaning of its own
+
     pos: { x: pos[0], y: pos[1], z: pos[2] },
     behParams,
     behavior: bhv,
@@ -237,6 +280,42 @@ describe("placedStars / absentStars", () => {
     // From the other area, everything in area 1 is elsewhere.
     expect(absentStars(stars, [], 2, 2).map((s) => s.reason)).toEqual([
       "area", "gone", "area", "area", "area", "gone",
+    ]);
+  });
+
+  it("places troll stars last, and matches them to live ones by spot", () => {
+    const deco = (pos: [number, number, number], area = 1): ScriptObject => ({
+      ...placed(area, 0x1f, 0x13001108, 0, pos),
+      model: MODEL_STAR,
+    });
+    const stars = placedStars([
+      placed(1, 0x1f, BHV.star, 0x08000000, [-17907, 1201, 500]), // ID 9
+      placed(1, 0x1f, BHV.star, 0x08000000, [-16600, 1201, 2196]), // ID 9 again
+      deco([-11065, 5678, -18435]),
+      deco([9, 9, 9], 2),
+      placed(1, 0x1f, BHV.star, 0x00000000, [0, 0, 0]),
+      { ...placed(1, 0x1f, 0x13001108, 0), model: 0x79 }, // not the star model
+    ]);
+    expect(stars.map((s) => [s.starId, s.fake ?? null])).toEqual([
+      [0, null],
+      [0, "lookalike"],
+      [0, "lookalike"],
+      [8, "badId"],
+      [8, "badId"],
+    ]);
+    // Live: the real star, one of the two ID-9 stars (the other was touched)
+    // and the area-1 decoration — which turned out to be a real pickup.
+    const live = findCollectibles({
+      ...message([
+        [1, virt(BHV.star), 0, 0, 0, 0, 0, 0],
+        [2, virt(BHV.star), -17907, 1201, 500, 0x08000000, 0, 0],
+        [3, virt(0x13001108), -11065, 5678, -18435, 0, 0xabc, INTERACT_STAR_OR_KEY],
+      ]),
+      starModel: 0xabc,
+    }).stars;
+    expect(absentStars(stars, live, 1, 1).map((s) => [s.pos.x, s.fake, s.reason])).toEqual([
+      [9, "lookalike", "area"],
+      [-16600, "badId", "gone"],
     ]);
   });
 });

@@ -115,6 +115,16 @@ canvas {
   color: #7d8494;
 }
 
+/* A troll star: listed so it can be found, marked so it isn't chased. */
+.hud .jump-list button.fake > span:first-child {
+  text-decoration: line-through;
+  text-decoration-color: rgba(229, 72, 77, 0.7);
+}
+
+.hud .jump-list button.fake .note {
+  color: #e5484d;
+}
+
 .hud .jump-list button:disabled {
   cursor: default;
 }

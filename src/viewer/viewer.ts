@@ -36,8 +36,9 @@ export interface AnomalyBox {
 
 /** Things in the level worth finding, drawn as fixed-size screen badges. */
 /** "starAbsent": a star the level places on this spot that is not loaded
- * right now (another act, or already gone) — drawn as an outline. */
-export type MarkerKind = "star" | "starAbsent" | "redCoin" | "secret";
+ * right now (another act, or already gone) — drawn as an outline.
+ * "starFake": a troll star (collectibles.ts FakeStar) — grey, crossed out. */
+export type MarkerKind = "star" | "starAbsent" | "starFake" | "redCoin" | "secret";
 
 export interface ViewerOptions {
   zFlip?: boolean;
@@ -89,6 +90,7 @@ export class Viewer {
   private markerGroups: Record<MarkerKind, THREE.Group> = {
     star: new THREE.Group(),
     starAbsent: new THREE.Group(),
+    starFake: new THREE.Group(),
     redCoin: new THREE.Group(),
     secret: new THREE.Group(),
   };
@@ -1068,6 +1070,7 @@ const JUMP_DISTANCE = 800;
 const MARKER_SIZE: Record<MarkerKind, number> = {
   star: 0.036,
   starAbsent: 0.032,
+  starFake: 0.032,
   redCoin: 0.026,
   secret: 0.03,
 };
@@ -1078,7 +1081,7 @@ function markerMaterial(kind: MarkerKind): THREE.SpriteMaterial {
   canvas.width = canvas.height = 128;
   const g = canvas.getContext("2d")!;
   g.lineJoin = "round";
-  if (kind === "star" || kind === "starAbsent") {
+  if (kind === "star" || kind === "starAbsent" || kind === "starFake") {
     g.beginPath();
     for (let i = 0; i < 10; i++) {
       const r = i % 2 === 0 ? 58 : 25;
@@ -1091,6 +1094,22 @@ function markerMaterial(kind: MarkerKind): THREE.SpriteMaterial {
       g.fill();
       g.lineWidth = 8;
       g.strokeStyle = "#5a3d00";
+      g.stroke();
+    } else if (kind === "starFake") {
+      // A troll star: grey, crossed out in red.
+      g.fillStyle = "#8a8f9c";
+      g.fill();
+      g.lineWidth = 8;
+      g.strokeStyle = "#2a2d36";
+      g.stroke();
+      g.lineCap = "round";
+      g.lineWidth = 12;
+      g.strokeStyle = "#e5484d";
+      g.beginPath();
+      g.moveTo(30, 32);
+      g.lineTo(98, 100);
+      g.moveTo(98, 32);
+      g.lineTo(30, 100);
       g.stroke();
     } else {
       // Not there now: a dark star with a pale outline, no gold.

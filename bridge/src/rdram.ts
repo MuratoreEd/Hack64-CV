@@ -242,18 +242,27 @@ const OBJECTS = {
   pos: 0xa0, // oPosX/Y/Z, f32 x3
   behParams: 0x188, // oBehParams, u32
   behavior: 0x20c, // const BehaviorScript* (KSEG0)
+  model: 0x14, // header.gfx.sharedChild, struct GraphNode* (KSEG0)
+  interact: 0x130, // oInteractType, u32
 } as const;
 const US_SEGMENT_TABLE = 0x8033b400; // uintptr_t[32], physical offsets
 const US_CURR_COURSE_NUM = 0x8033bac6; // s16
 const US_CURR_ACT_NUM = 0x8033bac8; // s16
 const BEHAVIOR_SEGMENT = 0x13;
+// gLoadedGraphNodes (US): a pointer to the model-id → graph node table. Its
+// MODEL_STAR entry was checked live against the bhvStar objects' sharedChild
+// (and MODEL_TRANSPARENT_STAR against the red-coin star marker), 2026-11-17.
+const US_LOADED_GRAPH_NODES = 0x8032ddc4;
+const MODEL_STAR = 0x7a;
 
 export interface ObjectPoolState {
   course: number;
   act: number;
   behaviorBase: number;
-  /** [slot, behavior, x, y, z, behParams] per active slot. */
-  objects: [number, number, number, number, number, number][];
+  /** The star model's graph node (0 if the table isn't readable). */
+  starModel: number;
+  /** [slot, behavior, x, y, z, behParams, model, interact] per active slot. */
+  objects: [number, number, number, number, number, number, number, number][];
 }
 
 /** The active objects, read in one go so a slot's fields belong together.
@@ -276,12 +285,17 @@ export function readObjects(rd: Rdram): ObjectPoolState {
       coord(o + OBJECTS.pos + 4),
       coord(o + OBJECTS.pos + 8),
       b.readUInt32BE(o + OBJECTS.behParams),
+      b.readUInt32BE(o + OBJECTS.model),
+      b.readUInt32BE(o + OBJECTS.interact),
     ]);
   }
+  const table = rd.u32(US_LOADED_GRAPH_NODES);
+  const kseg0 = (p: number): boolean => p >>> 24 === 0x80 && (p & 0xffffff) < 0x800000;
   return {
     course: rd.s16(US_CURR_COURSE_NUM),
     act: rd.s16(US_CURR_ACT_NUM),
     behaviorBase: rd.u32(US_SEGMENT_TABLE + BEHAVIOR_SEGMENT * 4),
+    starModel: kseg0(table) ? rd.u32(table + MODEL_STAR * 4) : 0,
     objects,
   };
 }
