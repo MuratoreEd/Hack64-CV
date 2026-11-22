@@ -29,14 +29,10 @@ every wall reproduces on its own and gets drawn exactly where the game would sto
   (toggleable, off by default).
 - **Free-fly camera** with an adjustable speed, per-cause color pickers, and toggles
   for every layer.
-- **Ground truth reports** — when the viewer is wrong (a wall it missed, or one
-  that isn't there), park Mario on the spot, describe it, and save it: the file
-  carries the level's exact collision data, so the case can be replayed and
-  fixed (see [`corpus/README.md`](corpus/README.md)).
 
 ## Quick start (no install)
 
-1. Download **`InvisibleWallViewer.exe`** from the
+1. Download **`Hack64CV.exe`** from the
    [latest release](../../releases/latest).
 2. Double-click it. Your browser opens the viewer.
 3. Start **[Project64](https://www.pj64-emu.com/)** (Luna's PJ64 v3.x is the
@@ -148,7 +144,12 @@ npm run dev       # Vite dev server (viewer)
 npm run typecheck # type-check the viewer, the bridge and the scripts
 npm run build     # type-check + production build
 npm run build:exe # package the standalone exe (dist-exe/InvisibleWallViewer.exe)
+npm run build:release # package the public release (dist-exe/Hack64CV.exe)
 ```
+
+`build:exe` is the everyday build and keeps the development tools (the
+**Ground truth** capture panel and the `window.__ivw` console hook);
+`build:release` leaves them out.
 
 `npm test` is the fast suite. **`npm run corpus` is the gate for any change to
 the probe or the collision core**: it replays hand-labelled positions from real

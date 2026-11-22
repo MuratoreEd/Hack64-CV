@@ -2,7 +2,13 @@
 //   viewer (dist/, prebuilt by `npm run build`) + bridge (esbuild bundle)
 //   + koffi's prebuilt native module, packed into one exe with @yao-pkg/pkg.
 //
-//   npm run build:exe     ->  dist-exe/InvisibleWallViewer.exe
+//   npm run build:exe      ->  dist-exe/InvisibleWallViewer.exe  (everyday, with dev tools)
+//   npm run build:release  ->  dist-exe/Hack64CV.exe             (public release)
+//
+// --release rebuilds dist/ itself with IWV_RELEASE=1, which drops the
+// development tools (see __DEV_TOOLS__ in vite.config.ts), and names the exe
+// for publishing. dist/ is left holding the release build; `build:exe`
+// rebuilds it.
 //
 // Staging layout (build-exe/app/):
 //   index.cjs                                  bundled bridge/src/standalone.ts
@@ -20,7 +26,12 @@ import { build } from "esbuild";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const stage = path.join(root, "build-exe", "app");
-const outExe = path.join(root, "dist-exe", "InvisibleWallViewer.exe");
+const release = process.argv.includes("--release");
+const outExe = path.join(
+  root,
+  "dist-exe",
+  release ? "Hack64CV.exe" : "InvisibleWallViewer.exe",
+);
 const TARGET = "node24-win-x64";
 // Never a literal: src/version.ts is the single source (see it for why).
 const { version } = JSON.parse(
@@ -29,6 +40,15 @@ const { version } = JSON.parse(
 
 function step(name) {
   console.log(`\n=== ${name} ===`);
+}
+
+if (release) {
+  step("build viewer (release: no dev tools)");
+  execSync("npx vite build", {
+    cwd: root,
+    stdio: "inherit",
+    env: { ...process.env, IWV_RELEASE: "1" },
+  });
 }
 
 // 0. Preconditions

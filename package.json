@@ -10,6 +10,7 @@
     "typecheck": "tsc --noEmit && tsc --noEmit -p bridge",
     "build": "tsc --noEmit && vite build",
     "build:exe": "npm run typecheck && vite build && node scripts/buildExe.mjs",
+    "build:release": "npm run typecheck && node scripts/buildExe.mjs --release",
     "exe": "powershell -NoProfile -ExecutionPolicy Bypass -File run-exe.ps1",
     "shortcut": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/makeShortcut.ps1",
     "preview": "vite preview",

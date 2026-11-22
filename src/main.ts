@@ -54,11 +54,12 @@ viewer.setSurfaces(demoScene());
 // The packaged exe carries every development tool too: while the project is in
 // development, the exe is how it actually gets used. That's the ground-truth
 // capture panel (flag a spot as a false positive/negative, with a note) and
-// the window.__ivw console hook below. A public release decides what stays.
+// the window.__ivw console hook below. A public release (`npm run
+// build:release`, __DEV_TOOLS__ false) leaves both out.
 const hud = createHud(app, viewer, {
   // One button: connect, or — while connected, connecting or retrying — stop.
   onConnect: () => (client.active ? client.disconnect() : client.connect()),
-  onCaptureLabel: captureLabel,
+  onCaptureLabel: __DEV_TOOLS__ ? captureLabel : undefined,
   onJumpToMario: jumpToMario,
   onJump: (pos) => viewer.jumpTo(toScene(pos)),
 });
@@ -619,7 +620,7 @@ async function captureLabel(
 // preview tools) while validating the oracle and probe — in the exe as well, so
 // a report can be investigated on the build that produced it.
 const debug: Record<string, unknown> = { viewer, hud, captureLabel };
-(window as unknown as { __ivw: unknown }).__ivw = debug;
+if (__DEV_TOOLS__) (window as unknown as { __ivw: unknown }).__ivw = debug;
 
 // Dev: Vite serves the page on 5173 and the bridge listens on its own port.
 // Packaged exe: one server does both, so the bridge is wherever the page

@@ -4,7 +4,7 @@ Versions follow [semver](https://semver.org/). The version lives in
 `src/version.ts`; `src/version.test.ts` fails if this file, `package.json` or
 `bridge/package.json` disagree with it.
 
-## 1.2.0 — unreleased
+## 1.2.0 — 2026-11-22
 
 ### Security
 
@@ -186,9 +186,12 @@ Versions follow [semver](https://semver.org/). The version lives in
   bound.
 - `npm run typecheck` (and `build:exe`) now type-checks `bridge/` and
   `scripts/` as well; previously nothing did.
-- The packaged exe now carries the development tools: the **Ground truth**
-  panel (flag a false positive or negative, with a note), which used to exist
-  only when running from source, and the `window.__ivw` console hook.
+- The everyday exe (`npm run build:exe`) now carries the development tools:
+  the **Ground truth** panel (flag a false positive or negative, with a note),
+  which used to exist only when running from source, and the `window.__ivw`
+  console hook. The public release (`npm run build:release`) leaves them out.
+- The released exe is now called **`Hack64CV.exe`** (was
+  `InvisibleWallViewer.exe`).
 - The world scale is tracked per level: a new level waits (up to 4 s) for a
   measurement before probing, and the HUD says "not yet measured here" when it
   has to fall back to the previous level's value.

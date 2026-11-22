@@ -26,6 +26,9 @@ export default defineConfig(({ command }) => ({
   define: {
     __BUILD_ID__: JSON.stringify(command === "build" ? buildId() : "dev"),
     __BUILD_TIME__: JSON.stringify(new Date().toISOString()),
+    // Public release builds (`npm run build:release`) leave the development
+    // tools out; every other build, the everyday exe included, keeps them.
+    __DEV_TOOLS__: JSON.stringify(process.env.IWV_RELEASE !== "1"),
   },
   test: {
     environment: "node",
